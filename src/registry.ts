@@ -28,7 +28,7 @@ export function loadRegistry(path: string) {
   return registry.parse(JSON.parse(readFileSync(path, 'utf8')));
 }
 
-function canonicalLocation(path: string): string {
+export function canonicalLocation(path: string): string {
   try {
     return realpathSync.native(path);
   } catch (error) {
@@ -87,12 +87,20 @@ function directory(path: string) {
   return canonical;
 }
 
-function checkOutsideRoots(path: string, roots: Root[]) {
+export function checkOutsideRoots(path: string, roots: Root[], name = 'registry') {
   for (const root of roots) {
-    const location = canonicalLocation(root.path);
-    const suffix = relative(location, path);
-    if (!suffix || (suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix))) {
-      throw new Error('Put the registry outside the source roots.');
+    const locations = [root.path];
+    try {
+      locations.push(canonicalLocation(root.path));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (!code || !['EACCES', 'ENOENT', 'ELOOP', 'ENOTDIR', 'EPERM'].includes(code)) throw error;
+    }
+    if (locations.some(location => {
+      const suffix = relative(location, path);
+      return !suffix || (suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
+    })) {
+      throw new Error(`Put the ${name} outside the source roots.`);
     }
   }
 }

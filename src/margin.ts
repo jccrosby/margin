@@ -5,7 +5,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { id, loadRegistry, MarginError, register } from './registry.ts';
 import { readLines } from './read.ts';
-import { isSourcePath, listPaths, requireSource } from './sources.ts';
+import { isSourcePath, requireSource, sourceId } from './sources.ts';
+import { indexCoverage, liveInventory, refreshProject, searchProject } from './index.ts';
 
 const pagination = {
   limit: z.number().int().min(1).max(500).optional(),
@@ -95,22 +96,22 @@ async function serve(registryPath: string) {
     projectId: id, ...pagination
   }), args => {
     const { projectId } = args;
-    const project = getProject(registryPath, projectId);
+    const { project, allRoots } = getProject(registryPath, projectId);
     const sources: { sourceId: string; rootId: string; relativePath: string }[] = [];
     const warnings: { rootId: string; error: string }[] = [];
-    for (const root of project.roots) {
-      try {
-        for (const relativePath of listPaths(root)) {
-          sources.push({ sourceId: encode([projectId, root.id, relativePath]), rootId: root.id, relativePath });
+    const inventory = liveInventory(project.roots);
+    for (const [rootId, live] of inventory) {
+      if ('error' in live) warnings.push({ rootId, error: live.error });
+      else {
+        for (const relativePath of live.paths) {
+          sources.push({ sourceId: sourceId(projectId, rootId, relativePath), rootId, relativePath });
         }
-      } catch (error) {
-        if (!(error instanceof MarginError)) throw error;
-        warnings.push({ rootId: root.id, error: error.message });
       }
     }
     const { results, nextCursor } = page(sources, source => [source.rootId, source.relativePath],
       ['list_sources', projectId], 2, args);
-    return { sources: results, nextCursor, warnings };
+    const coverage = indexCoverage(registryPath, projectId, project.roots, allRoots, inventory);
+    return { sources: results, nextCursor, warnings, coverage };
   });
 
   tool('read_source', 'Read a bounded range of live UTF-8 lines from an eligible source.', z.strictObject({
@@ -118,12 +119,20 @@ async function serve(registryPath: string) {
     startLine: z.number().int().min(1).optional(),
     lineCount: z.number().int().min(1).max(500).optional()
   }), ({ projectId, sourceId, startLine = 1, lineCount = 100 }) => {
-    const project = getProject(registryPath, projectId);
+    const { project } = getProject(registryPath, projectId);
     const [, rootId, relativePath] = parseSourceId(projectId, sourceId);
     const root = project.roots.find(root => root.id === rootId);
     if (!root) throw new MarginError('source_unavailable');
     const path = requireSource(root, relativePath);
     return { sourceId, rootId, relativePath, ...readLines(path, startLine, lineCount) };
+  });
+
+  tool('search_project', 'Search indexed text and verify each citation against the live source.', z.strictObject({
+    projectId: id, query: z.string().min(1), mode: z.enum(['literal', 'ranked']).optional(),
+    limit: z.number().int().min(1).max(100).optional()
+  }), ({ projectId, query, mode = 'ranked', limit = 20 }) => {
+    const { project, allRoots } = getProject(registryPath, projectId);
+    return searchProject(registryPath, projectId, project.roots, allRoots, query, mode, limit);
   });
 
   server.setRequestHandler('tools/list', () => ({ tools }));
@@ -148,7 +157,7 @@ function parseSourceId(projectId: string, sourceId: string) {
 function getProject(registryPath: string, projectId: string) {
   const { projects } = loadRegistry(registryPath);
   if (!Object.hasOwn(projects, projectId)) throw new MarginError('project_unavailable');
-  return projects[projectId];
+  return { project: projects[projectId], allRoots: Object.values(projects).flatMap(project => project.roots) };
 }
 
 function result(data: Record<string, unknown>): CallToolResult {
@@ -167,10 +176,16 @@ try {
   if (command === 'register' && (args.length === 2 || args.length === 3)) {
     register(registryPath, args[0], args[1], args[2]);
     console.log(`Registered ${args[0]}.`);
+  } else if (command === 'refresh' && args.length === 1) {
+    const [projectId] = args;
+    const { project, allRoots } = getProject(registryPath, id.parse(projectId));
+    const roots = refreshProject(registryPath, projectId, project.roots, allRoots);
+    console.log(JSON.stringify({ projectId, roots }));
+    if (roots.some(root => root.status !== 'complete')) process.exitCode = 1;
   } else if (command === 'serve' && args.length === 0) {
     await serve(registryPath);
   } else {
-    throw new Error('Use serve or register <project-id> <checkout> [notes].');
+    throw new Error('Use serve, refresh <project-id>, or register <project-id> <checkout> [notes].');
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'Margin failed.');
