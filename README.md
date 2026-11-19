@@ -127,3 +127,51 @@ Run `npm test` and `npm run typecheck` in the Margin checkout. The tests launch 
 The Step 1 check used a fresh Codex CLI 0.167.0 session. Codex read bounded passages from both roots and rejected path escapes and foreign source IDs.
 
 The checkout paths, file hashes, and Git status matched the baseline.
+
+## Evaluate retrieval
+
+Freeze ten questions per project before tuning. Use two projects and include identifiers, paraphrases, code and notes together, and source conflicts.
+
+Record the search query and mode for each question. Record the required source ranges and which source governs any conflict.
+
+Keep the manifest outside the repository. This example uses synthetic data.
+
+```json
+{
+  "cases": [
+    {
+      "id": "sample-01",
+      "projectId": "sample",
+      "question": "When does the preview end?",
+      "query": "preview timeout",
+      "mode": "ranked",
+      "requires": [
+        { "rootId": "code", "relativePath": "player.ts", "startLine": 2, "endLine": 4 },
+        { "rootId": "notes", "relativePath": "policy.md", "startLine": 5, "endLine": 6 }
+      ],
+      "governs": "The policy governs."
+    }
+  ]
+}
+```
+
+Refresh both projects against the frozen source versions. Run the scorer from the Margin checkout.
+
+```sh
+node scripts/score-retrieval.ts --registry /absolute/path/to/projects.json \
+  --manifest /absolute/path/to/private/cases.json
+```
+
+The scorer sends one fixed query per case to `search_project`. Each required range must fit within one live text citation in the first five results.
+
+The scorer stops if Margin takes over 30 seconds to reply. The default JSON reports the score, case count, and p95 MCP round-trip latency in milliseconds. Add `--details` for a private report with case IDs, times, and missing ranges.
+
+Use a fresh Codex session for each project. Check that it connects the implementation to its requirement and explains conflicting evidence.
+
+Edit a cited file and switch a checkout to a different Git revision. Check that search drops stale citations before refresh.
+
+For a hybrid comparison, use the same cases, snapshots, and hardware. Require at least three recovered misses and preserve every baseline exact match. Cap p95 at 125% of baseline and require zero added per-query provider cost.
+
+Count refresh interruptions only when manual refresh restores the expected evidence. Consider automatic refresh after three distinct interruptions across at least two sessions. Test whether the proposed trigger would have prevented them.
+
+Publish aggregate results or synthetic examples. Keep real questions, paths, excerpts, and case details private.
