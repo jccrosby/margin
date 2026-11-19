@@ -31,6 +31,10 @@ export function isSourcePath(relativePath: string) {
   return textNames.has(name) || textExtensions.has(extname(name));
 }
 
+export function sourceId(projectId: string, rootId: string, relativePath: string) {
+  return Buffer.from(JSON.stringify([projectId, rootId, relativePath])).toString('base64url');
+}
+
 function gitPaths(root: Root, relativePath?: string) {
   const pathspec = relativePath === undefined ? [] : ['--', relativePath];
   const bytes = git(root.path, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--full-name',
@@ -88,26 +92,44 @@ function regularFile(root: Root, relativePath: string) {
     if (!lstatSync(path).isFile()) return undefined;
     if (root.kind === 'context' && realpathSync.native(path) !== path) return undefined;
     return path;
-  } catch {
-    return undefined;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw new MarginError('source_unavailable');
   }
 }
 
-export function listPaths(root: Root) {
+export function scanPaths(root: Root) {
   requireRoot(root);
   try {
     const paths = root.kind === 'git' ? gitPaths(root) : notePaths(root);
-    return Array.from(paths).filter(path => isSourcePath(path) && regularFile(root, path));
+    const eligible: string[] = [];
+    const unreadable: string[] = [];
+    for (const path of paths) {
+      if (!isSourcePath(path)) continue;
+      try {
+        if (regularFile(root, path)) eligible.push(path);
+      } catch {
+        unreadable.push(path);
+      }
+    }
+    return { paths: eligible, unreadable };
   } catch {
-    throw new MarginError('root_unavailable');
+    requireRoot(root);
+    throw new MarginError('root_scan_failed');
   }
+}
+
+export function requireListedSource(root: Root, relativePath: string) {
+  const path = isSourcePath(relativePath) && regularFile(root, relativePath);
+  if (!path) throw new MarginError('source_unavailable');
+  return path;
 }
 
 export function requireSource(root: Root, relativePath: string) {
   requireRoot(root);
-  const path = regularFile(root, relativePath);
+  const path = requireListedSource(root, relativePath);
   try {
-    if (path && (root.kind === 'context' || gitPaths(root, relativePath).has(relativePath))) return path;
+    if (root.kind === 'context' || gitPaths(root, relativePath).has(relativePath)) return path;
   } catch {
     throw new MarginError('root_unavailable');
   }
