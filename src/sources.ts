@@ -1,5 +1,6 @@
 import { lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { evidenceFormat } from './evidence.ts';
 import { git, requireGitCheckout } from './git.ts';
 import { MarginError, type Root } from './registry.ts';
 
@@ -28,7 +29,7 @@ export function isSourcePath(relativePath: string) {
   if (segments.some(segment => !segment || segment === '.' || segment === '..' ||
       segment.includes('\0') || isExcluded(segment))) return false;
   const name = segments.at(-1)!.toLowerCase();
-  return textNames.has(name) || textExtensions.has(extname(name));
+  return textNames.has(name) || textExtensions.has(extname(name)) || evidenceFormat(name) !== undefined;
 }
 
 export function sourceId(projectId: string, rootId: string, relativePath: string) {

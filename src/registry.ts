@@ -13,8 +13,17 @@ const root = z.strictObject({
   kind: z.enum(['git', 'context']),
   path: z.string().refine(path => isAbsolute(path) && normalize(path) === path)
 });
+export function approvedHttpsUrl(value: string) {
+  if (!/^https:\/\//i.test(value) || /[\s\\]/.test(value)) return undefined;
+  const url = URL.parse(value);
+  if (!url || url.protocol !== 'https:' || !url.hostname ||
+      url.username || url.password || value.includes('#')) return undefined;
+  return url.href;
+}
+
 const project = z.strictObject({
   name: z.string().min(1).optional(),
+  approvedUrls: z.array(z.string().refine(value => approvedHttpsUrl(value) === value)).optional(),
   roots: z.array(root).min(1).refine(roots => new Set(roots.map(root => root.id)).size === roots.length)
 });
 const registry = z.strictObject({ projects: z.record(id, project) });
@@ -51,8 +60,37 @@ export function register(path: string, projectId: string, checkout: string, note
   requireGitCheckout(roots[0].path);
   if (notes !== undefined) roots.push({ id: 'notes', kind: 'context', path: directory(notes) });
 
+  checkOutsideRoots(canonicalLocation(path), roots);
+  writeProject(path, projectId, old => ({
+    ...old,
+    roots: [...roots, ...(old?.roots.filter(root => root.id !== 'code' && root.id !== 'notes') ?? [])]
+  }));
+}
+
+export function addCheckout(path: string, projectId: string, rootId: string, checkout: string) {
+  id.parse(rootId);
+  if (rootId === 'code' || rootId === 'notes') throw new Error('Choose a new root ID.');
+  const root: Root = { id: rootId, kind: 'git', path: directory(checkout) };
+  requireGitCheckout(root.path);
+  checkOutsideRoots(canonicalLocation(path), [root]);
+  writeProject(path, projectId, project => {
+    if (!project) throw new MarginError('project_unavailable');
+    return { ...project, roots: [...project.roots.filter(root => root.id !== rootId), root] };
+  });
+}
+
+export function approveUrl(path: string, projectId: string, value: string) {
+  const url = approvedHttpsUrl(value);
+  if (!url) throw new Error('Provide an absolute HTTPS URL without credentials or a fragment.');
+  writeProject(path, projectId, project => {
+    if (!project) throw new MarginError('project_unavailable');
+    return { ...project, approvedUrls: [...new Set([...(project.approvedUrls ?? []), url])] };
+  });
+}
+
+function writeProject(path: string, projectId: string, update: (current: Project | undefined) => Project) {
+  id.parse(projectId);
   const destination = canonicalLocation(path);
-  checkOutsideRoots(destination, roots);
   if (lstatOrMissing(destination)) {
     checkOutsideRoots(destination, Object.values(loadRegistry(destination).projects).flatMap(project => project.roots));
   }
@@ -61,11 +99,10 @@ export function register(path: string, projectId: string, checkout: string, note
   const descriptor = openSync(lock, 'wx', 0o600);
   try {
     const current = lstatOrMissing(destination) ? loadRegistry(destination) : { projects: {} };
-    checkOutsideRoots(destination, Object.values(current.projects).flatMap(project => project.roots));
-    const projects = {
-      ...current.projects,
-      [projectId]: { ...(Object.hasOwn(current.projects, projectId) ? current.projects[projectId] : undefined), roots }
-    };
+    const old = Object.hasOwn(current.projects, projectId) ? current.projects[projectId] : undefined;
+    const next = update(old);
+    checkOutsideRoots(destination, [...Object.values(current.projects).flatMap(project => project.roots), ...next.roots]);
+    const projects = { ...current.projects, [projectId]: next };
     const temporary = mkdtempSync(join(dirname(destination), '.margin-'));
     try {
       const staged = join(temporary, 'projects.json');

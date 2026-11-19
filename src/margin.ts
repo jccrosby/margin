@@ -3,10 +3,12 @@ import { isAbsolute } from 'node:path';
 import { Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
-import { id, loadRegistry, MarginError, register } from './registry.ts';
+import { addCheckout, approvedHttpsUrl, approveUrl, id, loadRegistry, MarginError, register } from './registry.ts';
+import { evidenceFormat, evidenceLocation, type ImageBlock } from './evidence.ts';
+import { linksId } from './links.ts';
 import { readLines } from './read.ts';
 import { isSourcePath, requireSource, sourceId } from './sources.ts';
-import { indexCoverage, liveInventory, refreshProject, searchProject } from './index.ts';
+import { indexCoverage, indexRoots, liveInventory, openEvidence, refreshProject, searchProject } from './index.ts';
 
 const pagination = {
   limit: z.number().int().min(1).max(500).optional(),
@@ -65,7 +67,7 @@ async function serve(registryPath: string) {
   const handlers = new Map<string, (args: unknown) => CallToolResult>();
 
   function tool<T extends z.ZodObject>(
-    name: string, description: string, schema: T, handler: (args: z.infer<T>) => Record<string, unknown>
+    name: string, description: string, schema: T, handler: (args: z.infer<T>, images: ImageBlock[]) => Record<string, unknown>
   ) {
     tools.push({
       name, description,
@@ -76,7 +78,8 @@ async function serve(registryPath: string) {
       const parsed = schema.safeParse(args);
       if (!parsed.success) return result({ error: 'invalid_argument' });
       try {
-        return result(handler(parsed.data));
+        const images: ImageBlock[] = [];
+        return result(handler(parsed.data, images), images);
       } catch (error) {
         return result({ error: error instanceof MarginError ? error.message : 'registry_unavailable' });
       }
@@ -99,7 +102,8 @@ async function serve(registryPath: string) {
     const { project, allRoots } = getProject(registryPath, projectId);
     const sources: { sourceId: string; rootId: string; relativePath: string }[] = [];
     const warnings: { rootId: string; error: string }[] = [];
-    const inventory = liveInventory(project.roots);
+    const roots = indexRoots(project);
+    const inventory = liveInventory(roots);
     for (const [rootId, live] of inventory) {
       if ('error' in live) warnings.push({ rootId, error: live.error });
       else {
@@ -110,7 +114,7 @@ async function serve(registryPath: string) {
     }
     const { results, nextCursor } = page(sources, source => [source.rootId, source.relativePath],
       ['list_sources', projectId], 2, args);
-    const coverage = indexCoverage(registryPath, projectId, project.roots, allRoots, inventory);
+    const coverage = indexCoverage(registryPath, projectId, roots, allRoots, inventory);
     return { sources: results, nextCursor, warnings, coverage };
   });
 
@@ -124,6 +128,7 @@ async function serve(registryPath: string) {
     const root = project.roots.find(root => root.id === rootId);
     if (!root) throw new MarginError('source_unavailable');
     const path = requireSource(root, relativePath);
+    if (evidenceFormat(relativePath)) throw new MarginError('evidence_required');
     return { sourceId, rootId, relativePath, ...readLines(path, startLine, lineCount) };
   });
 
@@ -132,7 +137,24 @@ async function serve(registryPath: string) {
     limit: z.number().int().min(1).max(100).optional()
   }), ({ projectId, query, mode = 'ranked', limit = 20 }) => {
     const { project, allRoots } = getProject(registryPath, projectId);
-    return searchProject(registryPath, projectId, project.roots, allRoots, query, mode, limit);
+    return searchProject(registryPath, projectId, indexRoots(project), allRoots, query, mode, limit);
+  });
+
+  tool('open_evidence', 'Open document, image, video, or link evidence. ' +
+    'Pass both contentHash and location to reopen a citation. For a new image or frame, omit both. ' +
+    'Use atSeconds to select a video frame.', z.strictObject({
+    projectId: id, sourceId: z.string(), contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    location: evidenceLocation.optional(), atSeconds: z.number().finite().nonnegative().optional()
+  }), ({ projectId, sourceId, contentHash, location, atSeconds }, images) => {
+    if (location && !contentHash || location && atSeconds !== undefined) throw new MarginError('invalid_argument');
+    const { project, allRoots } = getProject(registryPath, projectId);
+    const [, rootId, relativePath] = parseSourceId(projectId, sourceId);
+    const root = indexRoots(project).find(root => root.id === rootId);
+    if (!root) throw new MarginError('source_unavailable');
+    const evidence = openEvidence(registryPath, projectId, root, allRoots, relativePath,
+      contentHash, location, atSeconds);
+    if (evidence.image) images.push(evidence.image);
+    return evidence.data;
   });
 
   server.setRequestHandler('tools/list', () => ({ tools }));
@@ -147,7 +169,8 @@ async function serve(registryPath: string) {
 function parseSourceId(projectId: string, sourceId: string) {
   try {
     const value = decode(sourceId);
-    if (value.length === 3 && value[0] === projectId && isSourcePath(value[2])) return value;
+    if (value.length === 3 && value[0] === projectId &&
+        (value[1] === linksId ? approvedHttpsUrl(value[2]) === value[2] : isSourcePath(value[2]))) return value;
   } catch {
     throw new MarginError('source_unavailable');
   }
@@ -160,11 +183,11 @@ function getProject(registryPath: string, projectId: string) {
   return { project: projects[projectId], allRoots: Object.values(projects).flatMap(project => project.roots) };
 }
 
-function result(data: Record<string, unknown>): CallToolResult {
+function result(data: Record<string, unknown>, images: ImageBlock[] = []): CallToolResult {
   return {
     isError: 'error' in data,
-    content: [{ type: 'text', text: JSON.stringify(data) }],
-    structuredContent: data
+    content: [{ type: 'text', text: JSON.stringify(data) }, ...images],
+    ...(images.length ? {} : { structuredContent: data })
   };
 }
 
@@ -176,16 +199,23 @@ try {
   if (command === 'register' && (args.length === 2 || args.length === 3)) {
     register(registryPath, args[0], args[1], args[2]);
     console.log(`Registered ${args[0]}.`);
+  } else if (command === 'add-checkout' && args.length === 3) {
+    addCheckout(registryPath, args[0], args[1], args[2]);
+    console.log(`Registered checkout ${args[1]} for ${args[0]}.`);
+  } else if (command === 'approve-url' && args.length === 2) {
+    approveUrl(registryPath, args[0], args[1]);
+    console.log(`Approved URL for ${args[0]}.`);
   } else if (command === 'refresh' && args.length === 1) {
     const [projectId] = args;
     const { project, allRoots } = getProject(registryPath, id.parse(projectId));
-    const roots = refreshProject(registryPath, projectId, project.roots, allRoots);
+    const roots = await refreshProject(registryPath, projectId, indexRoots(project), allRoots);
     console.log(JSON.stringify({ projectId, roots }));
     if (roots.some(root => root.status !== 'complete')) process.exitCode = 1;
   } else if (command === 'serve' && args.length === 0) {
     await serve(registryPath);
   } else {
-    throw new Error('Use serve, refresh <project-id>, or register <project-id> <checkout> [notes].');
+    throw new Error('Use serve, refresh <project-id>, register <project-id> <checkout> [notes], ' +
+      'add-checkout <project-id> <root-id> <checkout>, or approve-url <project-id> <https-url>.');
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'Margin failed.');

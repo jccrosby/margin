@@ -24,6 +24,21 @@ export function readLines(path: string, startLine: number, lineCount: number) {
   return readSource(path, fd => readRange(fd, startLine, lineCount));
 }
 
+export function readBytes(path: string, limit: number) {
+  return readSource(path, fd => {
+    if (fstatSync(fd).size > limit) throw new MarginError('source_too_large');
+    const chunks: Buffer[] = [];
+    const buffer = Buffer.alloc(64 * 1024);
+    let total = 0;
+    for (let size = readSync(fd, buffer); size > 0; size = readSync(fd, buffer)) {
+      total += size;
+      if (total > limit) throw new MarginError('source_too_large');
+      chunks.push(Buffer.from(buffer.subarray(0, size)));
+    }
+    return Buffer.concat(chunks, total);
+  });
+}
+
 export function readText(path: string) {
   return readSource(path, fd => {
     const bytes = readFileSync(fd);

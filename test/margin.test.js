@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -59,6 +60,7 @@ async function connect(t, { work, registry, env = process.env }) {
   });
   child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
   return {
+    callResult: (name, args) => request('tools/call', { name, arguments: args }),
     listTools: () => request('tools/list'),
     async call(name, args = {}) {
       const result = await request('tools/call', { name, arguments: args });
@@ -97,7 +99,7 @@ test('inventory applies Git, format, and path rules on each live page', { timeou
   put(fixture.checkout, 'ignored-untracked.ts');
   put(fixture.checkout, 'README.md');
   put(fixture.checkout, '.env.example');
-  put(fixture.checkout, 'unsupported.pdf');
+  put(fixture.checkout, 'unsupported.zip');
   put(fixture.notes, 'README.md');
   put(fixture.notes, 'id_ed25519');
   mkdirSync(join(fixture.notes, 'dist'));
@@ -140,7 +142,7 @@ test('reads live whole lines from both roots and rejects references outside them
   fixture.cli('register', 'beta', fixture.checkout, fixture.notes);
   const client = await connect(t, fixture);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name), ['list_projects', 'list_sources', 'read_source', 'search_project']);
+  assert.deepEqual(tools.map(tool => tool.name), ['list_projects', 'list_sources', 'read_source', 'search_project', 'open_evidence']);
   const { sources: [code, note] } = await client.call('list_sources', { projectId: 'alpha' });
   const read = (sourceId, range = {}, projectId = 'alpha') =>
     client.call('read_source', { projectId, sourceId, ...range });
@@ -549,4 +551,172 @@ DatabaseSync.prototype.exec = function (sql) {
   assert.deepEqual(readdirSync(fixture.checkout, { recursive: true }).sort(), before);
   fixture.cli('refresh', 'alpha');
   assert.deepEqual((await search()).hits.map(hit => hit.relativePath), ['big.ts', 'keep.ts']);
+});
+
+
+test('opens a versioned physical PDF page and reports a saved citation stale after edit', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const pdf = join(fixture.checkout, 'reference.pdf');
+  writeFileSync(pdf, 'synthetic PDF bytes');
+  fixture.cli('register', 'demo', fixture.checkout);
+  const env = fixtureDocling(fixture.work, {
+    texts: [
+      { label: 'text', text: 'The first physical page.', prov: [{ page_no: 1 }] },
+      { label: 'text', text: 'Maple owls require a blue marker.', prov: [{ page_no: 2 }] }
+    ]
+  });
+  const refresh = runWithEnv(fixture, env, 'refresh', 'demo');
+  assert.equal(refresh.status, 0, refresh.stderr || refresh.stdout);
+  const client = await connect(t, fixture);
+  const { hits: [hit] } = await client.call('search_project', { projectId: 'demo', query: 'maple owls' });
+  assert.equal(hit.kind, 'extracted_text');
+  assert.deepEqual(hit.location, { page: 2, item: 2 });
+  assert.equal(hit.text, 'Maple owls require a blue marker.');
+  assert.match(hit.contentHash, /^[a-f0-9]{64}$/);
+  const saved = { projectId: 'demo', sourceId: hit.sourceId, contentHash: hit.contentHash, location: hit.location };
+  assert.equal((await client.call('open_evidence', saved)).text, hit.text);
+  writeFileSync(pdf, 'edited synthetic PDF bytes');
+  assert.deepEqual(await client.call('open_evidence', saved), { error: 'stale_citation' });
+  assert.deepEqual((await client.call('search_project', { projectId: 'demo', query: 'maple owls' })).hits, []);
+});
+
+function fixtureDocling(work, document) {
+  const bin = join(work, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, 'docling'), `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+const directory = args[args.indexOf('--output') + 1];
+const filename = path.parse(args.at(-1)).name;
+fs.writeFileSync(path.join(directory, filename + '.json'), ${JSON.stringify(JSON.stringify(document))});
+`, { mode: 0o700 });
+  return { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+}
+
+function runWithEnv({ work, registry }, env, ...args) {
+  return spawnSync(process.execPath, [entry, '--registry', registry, ...args], { cwd: work, env, encoding: 'utf8' });
+}
+
+test('distinguishes repeated Word headings in a second Git checkout', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const second = join(fixture.work, 'another-checkout');
+  mkdirSync(second);
+  run(second, 'git', 'init', '--quiet');
+  writeFileSync(join(second, 'rules.docx'), 'synthetic Word bytes');
+  fixture.cli('register', 'demo', fixture.checkout);
+  fixture.cli('add-checkout', 'demo', 'second', second);
+  const env = fixtureDocling(fixture.work, {
+    texts: [
+      { label: 'section_header', text: 'Routing', level: 1 },
+      { label: 'paragraph', text: 'Use the west gate.' },
+      { label: 'section_header', text: 'Routing', level: 1 },
+      { label: 'paragraph', text: 'Use the north gate.' }
+    ]
+  });
+  const refresh = runWithEnv(fixture, env, 'refresh', 'demo');
+  assert.equal(refresh.status, 0, refresh.stderr || refresh.stdout);
+  const client = await connect(t, fixture);
+  const { hits } = await client.call('search_project', { projectId: 'demo', query: 'gate', mode: 'literal' });
+  assert.deepEqual(hits.map(hit => [hit.rootId, hit.location]), [
+    ['second', { headingPath: ['Routing'], paragraph: 2 }],
+    ['second', { headingPath: ['Routing'], paragraph: 4 }]
+  ]);
+  const { sourceId, contentHash, location } = hits[1];
+  assert.equal((await client.call('open_evidence', { projectId: 'demo', sourceId, contentHash, location })).text,
+    'Use the north gate.');
+});
+
+test('fetches approved redirects and stops before an unapproved target', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const requests = join(fixture.work, 'requests.log');
+  const shim = join(fixture.work, 'fetch-fixture.mjs');
+  writeFileSync(shim, `
+import { appendFileSync } from 'node:fs';
+globalThis.fetch = async (url, { redirect }) => {
+  if (redirect !== 'manual') throw new Error('Fixture requires manual redirects.');
+  appendFileSync(${JSON.stringify(requests)}, url + '\\n');
+  const path = new URL(url).pathname;
+  if (path === '/redirect') return Response.redirect('https://example.test/approved');
+  if (path === '/blocked') return Response.redirect('https://example.test/private');
+  if (path === '/approved') return new Response('A synthetic limit of seven.', {
+    headers: { 'content-type': 'text/plain' }
+  });
+  throw new Error('Unexpected request.');
+};
+`);
+  fixture.cli('register', 'demo', fixture.checkout);
+  fixture.cli('register', 'other', fixture.checkout);
+  fixture.cli('approve-url', 'other', 'https://example.test/private');
+  for (const path of ['redirect', 'approved', 'blocked']) {
+    fixture.cli('approve-url', 'demo', `https://example.test/${path}`);
+  }
+  const started = new Date().toISOString();
+  const refresh = runWithEnv(fixture, { ...process.env, NODE_OPTIONS: `--import=${shim}` }, 'refresh', 'demo');
+  assert.equal(refresh.status, 1, refresh.stderr || refresh.stdout);
+  assert.ok(JSON.parse(refresh.stdout).roots.flatMap(root => root.gaps)
+    .some(gap => gap.error === 'redirect_not_approved' && gap.relativePath === 'https://example.test/blocked'));
+  assert.deepEqual(readFileSync(requests, 'utf8').trim().split('\n').map(url => new URL(url).pathname),
+    ['/redirect', '/approved', '/approved', '/blocked']);
+  const client = await connect(t, fixture);
+  const { hits } = await client.call('search_project', { projectId: 'demo', query: 'synthetic limit' });
+  const redirected = hits.find(hit => hit.approvedUrl === 'https://example.test/redirect');
+  assert.equal(redirected.finalUrl, 'https://example.test/approved');
+  assert.match(redirected.retrievedAt, /Z$/);
+  assert.ok(redirected.retrievedAt >= started && redirected.retrievedAt <= new Date().toISOString());
+  assert.equal(redirected.contentHash, createHash('sha256').update('A synthetic limit of seven.').digest('hex'));
+  assert.equal(redirected.kind, 'extracted_text');
+  const { sourceId, contentHash, location } = redirected;
+  const open = projectId => client.call('open_evidence', { projectId, sourceId, contentHash, location });
+  assert.equal((await open('demo')).text, 'A synthetic limit of seven.');
+  assert.deepEqual(await open('other'), { error: 'source_unavailable' });
+});
+
+test('opens the original image when no OCR text can be extracted', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMBAAFc9GgdAAAAAElFTkSuQmCC', 'base64');
+  writeFileSync(join(fixture.checkout, 'diagram.png'), png);
+  fixture.cli('register', 'demo', fixture.checkout);
+  const refresh = runWithEnv(fixture, fixtureDocling(fixture.work, { texts: [] }), 'refresh', 'demo');
+  assert.equal(refresh.status, 1, refresh.stderr || refresh.stdout);
+  const client = await connect(t, fixture);
+  const { hits: [hit], coverage } = await client.call('search_project', {
+    projectId: 'demo', query: 'diagram.png', mode: 'literal'
+  });
+  assert.deepEqual(coverage.roots[0].gaps, [{ error: 'ocr_unavailable', relativePath: 'diagram.png' }]);
+  const { sourceId, contentHash, location } = hit;
+  const { content, structuredContent } = await client.callResult('open_evidence', {
+    projectId: 'demo', sourceId, contentHash, location
+  });
+  assert.deepEqual(content[1], { type: 'image', mimeType: 'image/png', data: png.toString('base64') });
+  assert.equal(structuredContent, undefined);
+  assert.equal(JSON.parse(content[0].text).kind, 'image');
+  assert.deepEqual(JSON.parse(content[0].text).failures, ['ocr_unavailable']);
+});
+
+test('opens a timed transcript and reports the actual selected frame timestamp', { timeout: 15000 }, async t => {
+  if (spawnSync('ffmpeg', ['-version']).error?.code === 'ENOENT') {
+    t.skip('FFmpeg is unavailable.');
+    return;
+  }
+  const fixture = setup(t);
+  const subtitles = join(fixture.work, 'speech.srt');
+  writeFileSync(subtitles, '1\n00:00:00,500 --> 00:00:01,800\nUse the blue sign.\n');
+  run(fixture.work, 'ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=red:s=48x48:r=2:d=2',
+    '-i', subtitles, '-c:v', 'mpeg4', '-c:s', 'mov_text', join(fixture.checkout, 'demo.mp4'));
+  fixture.cli('register', 'demo', fixture.checkout);
+  fixture.cli('refresh', 'demo');
+  const client = await connect(t, fixture);
+  const { hits: [hit] } = await client.call('search_project', { projectId: 'demo', query: 'blue sign' });
+  assert.equal(hit.kind, 'transcript');
+  assert.deepEqual(hit.location, { startSeconds: 0.5, endSeconds: 1.8 });
+  const { sourceId, contentHash, location } = hit;
+  const open = args => client.callResult('open_evidence', { projectId: 'demo', sourceId, contentHash, ...args });
+  assert.equal((await open({ location })).structuredContent.text, 'Use the blue sign.');
+  const result = await open({ atSeconds: 1.1 });
+  const frame = JSON.parse(result.content[0].text);
+  assert.equal(frame.kind, 'frame');
+  assert.deepEqual(frame.location, { timestampSeconds: 1.5 });
+  assert.equal(result.content[1].mimeType, 'image/png');
+  assert.equal((await open({ location: frame.location })).content[1].data, result.content[1].data);
 });
