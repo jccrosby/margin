@@ -1,10 +1,22 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { closeSync, constants, lstatSync, openSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { literalPassages, rankedPassages, textLines } from './passages.ts';
+import {
+  contentHash as hash, evidenceFormat, extractEvidence, originalImage, readEvidenceBytes, videoFrame,
+  type Evidence, type EvidenceItem, type Retrieval
+} from './evidence.ts';
+import { fetchEvidence, linksId } from './links.ts';
+import { literalPassages, passageAtLines, rankedPassages, textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
-import { canonicalLocation, checkOutsideRoots, MarginError, type Root } from './registry.ts';
+import { canonicalLocation, checkOutsideRoots, MarginError, type Project, type Root } from './registry.ts';
 import { requireListedSource, requireSource, scanPaths, sourceId } from './sources.ts';
+
+type IndexRoot = Root | { id: typeof linksId; kind: 'links'; path: ''; urls: string[] };
+
+export function indexRoots(project: Project): IndexRoot[] {
+  const urls = project.approvedUrls;
+  return urls?.length ? [...project.roots, { id: linksId, kind: 'links', path: '', urls }] : project.roots;
+}
 
 type Gap = { error: string; relativePath?: string };
 type Refresh = { status: string; refreshedAt?: string; gaps: Gap[] };
@@ -14,13 +26,9 @@ type Passage = { startLine: number; endLine: number; text: string };
 type Ranked = Omit<Source, 'text'> & Passage;
 type Hit = {
   sourceId: string; rootId: string; relativePath: string; matchedOn: 'path' | 'text'
-} & Partial<Passage>;
+} & Partial<Passage & EvidenceItem & Retrieval & { contentHash: string }>;
 
-function hash(text: string) {
-  return createHash('sha256').update(text).digest('hex');
-}
-
-function rootKey(root: Root) {
+function rootKey(root: IndexRoot) {
   return JSON.stringify([root.id, root.kind, root.path]);
 }
 
@@ -66,6 +74,10 @@ const schema = `
     endLine INTEGER NOT NULL,
     text TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS evidence (
+    source INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    data TEXT NOT NULL
+  );
   CREATE INDEX IF NOT EXISTS ranges_source ON ranges(source);
   CREATE VIRTUAL TABLE IF NOT EXISTS passages USING fts5(text, content=ranges, content_rowid=id);
   CREATE TRIGGER IF NOT EXISTS ranges_insert AFTER INSERT ON ranges BEGIN
@@ -109,36 +121,43 @@ function getRefresh(db: DatabaseSync | undefined, key: string): Refresh {
   return { status: row.status as string, refreshedAt: (row.refreshedAt ?? undefined) as string | undefined, gaps };
 }
 
-export function refreshProject(registryPath: string, projectId: string, roots: Root[], allRoots: Root[]) {
+export async function refreshProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[]) {
   const db = openIndex(indexPath(registryPath, projectId, allRoots), true)!;
   try {
     const registered = roots.map(root => root.id);
     const placeholders = registered.map(() => '?').join(', ');
     db.prepare(`DELETE FROM sources WHERE rootId NOT IN (${placeholders})`).run(...registered);
     db.prepare(`DELETE FROM refreshes WHERE rootId NOT IN (${placeholders})`).run(...registered);
-    return roots.map(root => ({ rootId: root.id, ...refreshRoot(db, root) }));
+    const refreshed = [];
+    for (const root of roots) refreshed.push({ rootId: root.id, ...await refreshRoot(db, root) });
+    return refreshed;
   } finally {
     db.close();
   }
 }
 
-function refreshRoot(db: DatabaseSync, root: Root) {
+async function refreshRoot(db: DatabaseSync, root: IndexRoot) {
   const key = rootKey(root);
   const attempt = randomUUID();
   db.prepare(`INSERT INTO refreshes VALUES (?, ?, ?, 'refreshing', NULL, '[]')
     ON CONFLICT(rootKey) DO UPDATE SET attempt = excluded.attempt, status = 'refreshing'`).run(key, root.id, attempt);
+  const links = root.kind === 'links' ? await getLinks(root.urls) : undefined;
   db.exec('BEGIN IMMEDIATE');
   try {
     if (db.prepare('SELECT attempt FROM refreshes WHERE rootKey = ?').get(key)?.attempt === attempt) {
-      let inventory;
-      try {
-        inventory = scanPaths(root);
-      } catch (error) {
-        const gap = error instanceof MarginError ? error.message : 'root_scan_failed';
-        db.prepare("UPDATE refreshes SET status = 'failed', gaps = ? WHERE rootKey = ?")
-          .run(JSON.stringify([{ error: gap }]), key);
+      if (root.kind === 'links') {
+        publishLinks(db, root, key, links!);
+      } else {
+        let inventory;
+        try {
+          inventory = scanPaths(root);
+        } catch (error) {
+          const gap = error instanceof MarginError ? error.message : 'root_scan_failed';
+          db.prepare("UPDATE refreshes SET status = 'failed', gaps = ? WHERE rootKey = ?")
+            .run(JSON.stringify([{ error: gap }]), key);
+        }
+        if (inventory) publishRoot(db, root, key, inventory);
       }
-      if (inventory) publishRoot(db, root, key, inventory);
     }
     db.exec('COMMIT');
   } catch (error) {
@@ -162,10 +181,26 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
   }
   for (const relativePath of inventory.paths) {
     let text;
+    let bytes;
+    const format = evidenceFormat(relativePath);
     try {
-      text = readText(requireListedSource(root, relativePath));
-    } catch {
-      gaps.push({ error: 'source_unavailable', relativePath });
+      const path = requireListedSource(root, relativePath);
+      if (format) bytes = readEvidenceBytes(path);
+      text = format ? '' : readText(path);
+    } catch (cause) {
+      gaps.push({ error: cause instanceof MarginError ? cause.message : 'source_unavailable', relativePath });
+      continue;
+    }
+
+    const entry = previous.get(relativePath);
+    if (bytes) {
+      const digest = hash(bytes);
+      let evidence = entry?.hash === digest ? storedEvidence(db, root.id, key, relativePath)?.evidence : undefined;
+      if (evidence && !evidence.errors.length) continue;
+      evidence = extractEvidence(bytes, relativePath);
+      for (const error of evidence.errors) gaps.push({ error, relativePath });
+      if (entry) removeSource.run(entry.id);
+      saveEvidence(db, root.id, key, relativePath, digest, evidence);
       continue;
     }
 
@@ -173,7 +208,6 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
     const sizes = lines.map(line => Buffer.byteLength(line));
     if (sizes.some(size => size > maxBytes)) gaps.push({ error: 'line_too_long', relativePath });
     const digest = hash(text);
-    const entry = previous.get(relativePath);
     if (entry?.hash === digest) continue;
     if (entry) removeSource.run(entry.id);
     const { lastInsertRowid } = addSource.run(root.id, key, relativePath, digest, text);
@@ -181,15 +215,56 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
       addRange.run(lastInsertRowid, passage.startLine, passage.endLine, passage.text);
     }
   }
+  publishStatus(db, key, gaps);
+}
+
+async function getLinks(urls: string[]) {
+  const successes = new Map<string, Awaited<ReturnType<typeof fetchEvidence>>>();
+  const gaps: Gap[] = [];
+  for (const url of urls) {
+    try {
+      const fetched = await fetchEvidence(url, urls);
+      successes.set(url, fetched);
+      for (const error of fetched.evidence.errors) gaps.push({ error, relativePath: url });
+    } catch (cause) {
+      gaps.push({ error: cause instanceof MarginError ? cause.message : 'fetch_failed', relativePath: url });
+    }
+  }
+  return { successes, gaps };
+}
+
+function publishLinks(db: DatabaseSync, root: IndexRoot, key: string, { successes, gaps }: Awaited<ReturnType<typeof getLinks>>) {
+  db.prepare('DELETE FROM sources WHERE rootKey = ?').run(key);
+  for (const [url, { digest, evidence, sourceText }] of successes) {
+    saveEvidence(db, root.id, key, url, digest, evidence, sourceText);
+  }
+  publishStatus(db, key, gaps);
+}
+
+function saveEvidence(db: DatabaseSync, rootId: string, key: string, path: string, digest: string,
+  evidence: Evidence, sourceText?: string) {
+  const addSource = db.prepare('INSERT INTO sources(rootId, rootKey, relativePath, hash, text) VALUES (?, ?, ?, ?, ?)');
+  const { lastInsertRowid } = addSource.run(rootId, key, path, digest,
+    sourceText ?? evidence.items.map(item => item.text ?? '').join('\n'));
+  db.prepare('INSERT INTO evidence(source, data) VALUES (?, ?)').run(lastInsertRowid, JSON.stringify(evidence));
+  const addRange = db.prepare('INSERT INTO ranges(source, startLine, endLine, text) VALUES (?, ?, ?, ?)');
+  // feat: Store the item position for evidence ranges so search can recover its locator.
+  for (const [index, item] of evidence.items.entries()) {
+    const itemPosition = index + 1;
+    if (item.text) addRange.run(lastInsertRowid, itemPosition, itemPosition, item.text);
+  }
+}
+
+function publishStatus(db: DatabaseSync, key: string, gaps: Gap[]) {
   db.prepare('UPDATE refreshes SET status = ?, refreshedAt = ?, gaps = ? WHERE rootKey = ?')
     .run(gaps.length ? 'partial' : 'complete', new Date().toISOString(), JSON.stringify(gaps), key);
 }
 
-export function liveInventory(roots: Root[]): Inventory {
+export function liveInventory(roots: IndexRoot[]): Inventory {
   const inventory: Inventory = new Map();
   for (const root of roots) {
     try {
-      inventory.set(root.id, scanPaths(root));
+      inventory.set(root.id, root.kind === 'links' ? { paths: root.urls, unreadable: [] } : scanPaths(root));
     } catch (error) {
       if (!(error instanceof MarginError)) throw error;
       inventory.set(root.id, { error: error.message });
@@ -200,7 +275,7 @@ export function liveInventory(roots: Root[]): Inventory {
 
 type Coverage = ReturnType<typeof collectCoverage>;
 
-function collectCoverage(db: DatabaseSync | undefined, roots: Root[], inventory: Inventory) {
+function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inventory: Inventory) {
   const coverage = roots.map(root => {
     const key = rootKey(root);
     const { status, refreshedAt, gaps } = getRefresh(db, key);
@@ -211,7 +286,8 @@ function collectCoverage(db: DatabaseSync | undefined, roots: Root[], inventory:
       if (db && status !== 'not_refreshed') {
         const indexed = new Set(db.prepare('SELECT relativePath FROM sources WHERE rootKey = ?')
           .all(key).map(row => row.relativePath as string));
-        const added = live.paths.filter(path => !indexed.delete(path));
+        const failed = new Set(gaps.map(gap => gap.relativePath));
+        const added = live.paths.filter(path => !indexed.delete(path) && (root.kind !== 'links' || !failed.has(path)));
         for (const path of live.unreadable) indexed.delete(path);
         if (added.length || indexed.size) gaps.push({ error: 'paths_changed' });
       }
@@ -242,7 +318,7 @@ function withIndex<T>(
   }
 }
 
-export function indexCoverage(registryPath: string, projectId: string, roots: Root[],
+export function indexCoverage(registryPath: string, projectId: string, roots: IndexRoot[],
   allRoots: Root[], inventory: Inventory) {
   try {
     return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory));
@@ -251,6 +327,90 @@ export function indexCoverage(registryPath: string, projectId: string, roots: Ro
     for (const root of coverage.roots) root.gaps.push({ error: 'index_unavailable' });
     return coverage;
   }
+}
+
+function storedEvidence(db: DatabaseSync | undefined, rootId: string, key: string, relativePath: string) {
+  if (!db?.prepare("SELECT 1 FROM sqlite_master WHERE name = 'evidence'").get()) return undefined;
+  const row = db.prepare(`SELECT s.hash, s.text, e.data FROM sources s JOIN evidence e ON e.source = s.id
+    WHERE s.rootId = ? AND s.rootKey = ? AND s.relativePath = ?`).get(rootId, key, relativePath);
+  if (row) {
+    const evidence = JSON.parse(row.data as string) as Evidence;
+    return { contentHash: row.hash as string, evidence, sourceText: evidence.lineBased ? row.text as string : undefined };
+  }
+}
+
+export function openEvidence(registryPath: string, projectId: string, root: IndexRoot, allRoots: Root[],
+  relativePath: string, requestedHash: string | undefined, location: EvidenceItem['location'] | undefined,
+  atSeconds: number | undefined) {
+  const format = evidenceFormat(relativePath);
+  const lookup = () => withIndex(registryPath, projectId, allRoots, db =>
+    storedEvidence(db, root.id, rootKey(root), relativePath));
+  const source = { sourceId: sourceId(projectId, root.id, relativePath), rootId: root.id, relativePath };
+  if (root.kind === 'links') {
+    if (atSeconds !== undefined) throw new MarginError('invalid_argument');
+    if (!root.urls.includes(relativePath)) throw new MarginError('source_unavailable');
+    const indexed = lookup();
+    if (!indexed || !allowsRetrieval(root.urls, indexed.evidence)) throw new MarginError('refresh_required');
+    const { contentHash, evidence } = indexed;
+    if (requestedHash && requestedHash !== contentHash) throw new MarginError('stale_citation');
+    let item: EvidenceItem | undefined;
+    if (indexed.sourceText !== undefined && location && 'startLine' in location) {
+      const text = passageAtLines(indexed.sourceText, location.startLine, location.endLine);
+      if (text === undefined) throw new MarginError('evidence_unavailable');
+      item = { kind: 'extracted_text', location, text };
+    } else {
+      item = selectEvidence(evidence, location, item => item.text !== undefined);
+    }
+    return { data: { ...source, contentHash, ...evidence.retrieval, failures: evidence.errors,
+      ...(item ?? { kind: 'link', location: {} }) } };
+  }
+  if (!format) throw new MarginError('evidence_unavailable');
+  if (atSeconds !== undefined && format !== 'video') throw new MarginError('invalid_argument');
+  const bytes = readEvidenceBytes(requireSource(root, relativePath));
+  const contentHash = hash(bytes);
+  if (requestedHash && requestedHash !== contentHash) throw new MarginError('stale_citation');
+  const media = format === 'image' || (format === 'video' && (atSeconds !== undefined ||
+    (location && 'timestampSeconds' in location)));
+  let indexed;
+  const failures = [];
+  try {
+    indexed = lookup();
+  } catch (error) {
+    if (!media || !(error instanceof MarginError) || error.message !== 'index_unavailable') throw error;
+    failures.push(error.message);
+  }
+  const evidence = indexed?.contentHash === contentHash ? indexed.evidence : undefined;
+  const base = {
+    ...source, contentHash, failures: evidence?.errors ?? failures
+  };
+  if (format === 'image' && (!location || ('image' in location && !('item' in location)))) {
+    return { data: { ...base, kind: 'image', location: { image: 1 } }, image: originalImage(bytes, relativePath) };
+  }
+  if (format === 'video' && (atSeconds !== undefined || (location && 'timestampSeconds' in location))) {
+    const timestamp = location && 'timestampSeconds' in location ? location.timestampSeconds : atSeconds!;
+    const frame = videoFrame(bytes, relativePath, timestamp);
+    if (atSeconds === undefined && Math.abs(frame.location.timestampSeconds - timestamp) > 1e-9) {
+      throw new MarginError('evidence_unavailable');
+    }
+    return { data: { ...base, kind: 'frame', location: frame.location }, image: frame.image };
+  }
+  if (!evidence) throw new MarginError('refresh_required');
+  const item = selectEvidence(evidence, location, item => item.text !== undefined);
+  return { data: { ...base, ...(item ?? { kind: 'source', location: {} }) } };
+}
+
+function allowsRetrieval(urls: string[], evidence: Evidence) {
+  return evidence.approvalsUsed?.every(url => urls.includes(url)) === true;
+}
+
+function selectEvidence(evidence: Evidence, location: EvidenceItem['location'] | undefined,
+  defaultItem: (item: EvidenceItem) => boolean) {
+  if (location && !Object.keys(location).length) return undefined;
+  const item = location
+    ? evidence.items.find(item => JSON.stringify(item.location) === JSON.stringify(location))
+    : evidence.items.find(defaultItem);
+  if (location && !item) throw new MarginError('evidence_unavailable');
+  return item;
 }
 
 function rankedQuery(query: string) {
@@ -281,6 +441,10 @@ function* candidates(db: DatabaseSync, query: string, mode: 'literal' | 'ranked'
     const sources = db.prepare(`SELECT rootId, rootKey, relativePath, hash, text FROM sources
       WHERE instr(text, ?) > 0 ORDER BY rootId, relativePath`).iterate(query) as Iterable<Source>;
     for (const { text, ...source } of sources) {
+      if (source.rootId === linksId || evidenceFormat(source.relativePath)) {
+        yield { ...source, matchedOn: 'text' as const };
+        continue;
+      }
       for (const range of literalPassages(text, query)) {
         if (range) yield { ...source, ...range, matchedOn: 'text' as const };
         else yield { ...source, missingCitation: true };
@@ -289,7 +453,7 @@ function* candidates(db: DatabaseSync, query: string, mode: 'literal' | 'ranked'
   }
 }
 
-export function searchProject(registryPath: string, projectId: string, roots: Root[], allRoots: Root[],
+export function searchProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[],
   query: string, mode: 'literal' | 'ranked', limit: number) {
   const inventory = liveInventory(roots);
   return withIndex(registryPath, projectId, allRoots, db => {
@@ -297,6 +461,7 @@ export function searchProject(registryPath: string, projectId: string, roots: Ro
     const hits: Hit[] = [];
     if (db) {
       const verified = new Map<string, boolean>();
+      const snapshots = new Map<string, ReturnType<typeof storedEvidence>>();
       for (const { rootKey: key, hash: expected, ...candidate } of candidates(db, query, mode)) {
         const { rootId, relativePath } = candidate;
         const root = roots.find(root => root.id === rootId && rootKey(root) === key);
@@ -305,11 +470,56 @@ export function searchProject(registryPath: string, projectId: string, roots: Ro
         if (!verified.has(cacheKey)) {
           const current = inventory.get(rootId)!;
           if ('error' in current && current.error === 'root_unavailable') continue;
-          verified.set(cacheKey, verify(root, relativePath, expected, coverage));
+          verified.set(cacheKey, root.kind === 'links'
+            ? root.urls.includes(relativePath)
+            : verify(root, relativePath, expected, coverage));
         }
         if (!verified.get(cacheKey)) continue;
         if ('missingCitation' in candidate) {
           recordGap(coverage, rootId, { error: 'citation_unavailable', relativePath });
+          continue;
+        }
+        if (root.kind === 'links' || evidenceFormat(relativePath)) {
+          if (!snapshots.has(cacheKey)) {
+            snapshots.set(cacheKey, storedEvidence(db, rootId, key, relativePath));
+          }
+          const snapshot = snapshots.get(cacheKey);
+          if (!snapshot) continue;
+          const { evidence: stored, sourceText } = snapshot;
+          if (root.kind === 'links' && !allowsRetrieval(root.urls, stored)) {
+            recordGap(coverage, rootId, { error: 'redirect_not_approved', relativePath });
+            continue;
+          }
+          const matchedOn = candidate.matchedOn;
+          const source = { sourceId: sourceId(projectId, rootId, relativePath), rootId, relativePath,
+            contentHash: expected, ...stored.retrieval };
+          if (matchedOn === 'path') {
+            const item = stored.items[0];
+            const kind: EvidenceItem['kind'] = root.kind === 'links' ? 'link' : 'source';
+            const cite = item ? { kind: item.kind, location: item.location } : { kind, location: {} };
+            hits.push({ ...source, matchedOn, ...cite });
+          } else if (mode === 'literal' && sourceText !== undefined) {
+            for (const passage of literalPassages(sourceText, query)) {
+              if (!passage) {
+                recordGap(coverage, rootId, { error: 'citation_unavailable', relativePath });
+                continue;
+              }
+              const { text, ...location } = passage;
+              hits.push({ ...source, matchedOn: 'text', kind: 'extracted_text', location, text });
+              if (hits.length === limit) break;
+            }
+          } else {
+            const itemPosition = 'startLine' in candidate ? candidate.startLine : undefined;
+            const items = mode === 'ranked' && itemPosition !== undefined
+              ? [stored.items[itemPosition - 1]]
+              : stored.items.filter(item => item.text?.includes(query));
+            for (const item of items) {
+              if (!item) continue;
+              hits.push({ ...source, matchedOn: 'text', ...item });
+              if (hits.length === limit) break;
+            }
+          }
+          if (hits.length === limit) break;
           continue;
         }
         hits.push({ sourceId: sourceId(projectId, rootId, relativePath), ...candidate });
@@ -324,7 +534,7 @@ function verify(root: Root, relativePath: string, expected: string, coverage: Co
   let error: string;
   try {
     const path = requireSource(root, relativePath);
-    if (hash(readText(path)) === expected) return true;
+    if (hash(evidenceFormat(relativePath) ? readEvidenceBytes(path) : readText(path)) === expected) return true;
     error = 'source_changed';
   } catch (cause) {
     error = cause instanceof MarginError ? cause.message : 'source_unavailable';

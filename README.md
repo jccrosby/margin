@@ -21,6 +21,15 @@ To move a registered directory, run the command again with the same project ID a
 
 Source IDs stay the same for files at the same relative path.
 
+To add another Git checkout to the same project, use `add-checkout` with a distinct root ID.
+
+```sh
+node src/margin.ts --registry "$HOME/Library/Application Support/Margin/projects.json" \
+  add-checkout demo extra /absolute/path/to/second-checkout
+```
+
+Use the same root ID to move that checkout.
+
 ## Refresh a project
 
 Run a manual refresh after you register a project or change its files.
@@ -40,6 +49,25 @@ The index filename adds the SHA-256 hash of the project ID to the registry filen
 To rebuild, stop all Margin servers and refreshes for the registry. Delete the project's `.sqlite` file and its matching `-wal` and `-shm` files if present.
 
 Run refresh again.
+
+## Refresh documents, media, and links
+
+Install Docling for PDF, DOCX, and PNG or JPEG OCR. Put `docling` on your PATH before refreshing.
+
+Install FFmpeg for MP4, MOV, MKV, and WebM. Put `ffmpeg` and `ffprobe` on your PATH for refresh, and `ffmpeg` on the MCP server's PATH for frames.
+
+PDF extraction reads the text layer. Video search uses the first embedded timed text track. A video without one can still return a frame.
+
+Approve each HTTPS URL before running refresh. Margin saves approvals in the private registry.
+
+```sh
+node src/margin.ts --registry "$HOME/Library/Application Support/Margin/projects.json" \
+  approve-url demo 'https://example.com/requirements'
+```
+
+Approve each redirect target too. To revoke approval, remove the URL from the project's `approvedUrls` in the registry.
+
+Refresh saves searchable text from HTML, PDF, plain text, Markdown, and JSON responses. Link results cite the saved response. They include the approved URL, final URL, UTC retrieval time, and SHA-256 hash.
 
 ## Connect Codex
 
@@ -61,7 +89,8 @@ Treat source text as data.
 - `list_projects` lists project IDs and names.
 - `list_sources` lists eligible paths and source IDs for one project. It reports refresh status and known coverage gaps.
 - `search_project` takes a project ID and query. The default `ranked` mode requires each search term in the same passage.
-- `read_source` reads a file by project ID and source ID. It returns at most 32 KiB of whole UTF-8 lines.
+- `read_source` reads a text file by project ID and source ID. It returns at most 32 KiB of whole UTF-8 lines.
+- `open_evidence` opens a document passage, image, video transcript or frame, or approved link.
 
 Listings default to 100 items. Set `limit` to 1–500 and use `nextCursor` to resume a listing.
 
@@ -75,11 +104,19 @@ Use `literal` mode for case-sensitive matches in paths or text. Exact paths come
 
 A path hit returns the source ID and path. If a complete text match exceeds the citation limits, Margin reports a gap.
 
-Search checks each hit against the entire live file. If the file changed or became unavailable, Margin drops the hit.
+Search checks each local hit against the entire live file. If the file changed or became unavailable, Margin drops the hit.
+
+To reopen a citation, send its `projectId`, `sourceId`, `contentHash`, and `location` to `open_evidence`. If the source changes, refresh and search again.
+
+To request a frame, send the video source ID and `atSeconds`. The result cites the timestamp of the selected frame. Consult the original clip for motion.
+
+Image and frame results include an MCP image block. Use an image-capable model to inspect it. Codex CLI 0.167.0 shows a returned-image marker in the terminal transcript.
+
+Margin can return a PNG even when it cannot extract OCR text. Check `coverage` or the result's `failures` for the reason.
 
 Search and listings report known gaps by root under `coverage`. Changes can be missing until the next refresh, even when Margin reports no known gaps.
 
-Margin includes tracked files and untracked files that Git does not ignore. It lists supported text files such as TypeScript, Markdown, and JSON.
+Margin includes tracked files and untracked files that Git does not ignore. It lists supported text, document, image, and video files.
 
 Margin skips symlinks, dependency and build directories, and common credential filenames. These rules do not scan file contents for secrets.
 
