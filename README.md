@@ -155,6 +155,8 @@ The Step 1 check used a fresh Codex CLI 0.167.0 session. Codex read bounded pass
 
 The checkout paths, file hashes, and Git status matched the baseline.
 
+See the [release instructions](https://github.com/jccrosby/margin/blob/main/RELEASING.md) for package checks and publishing.
+
 ## Evaluate retrieval
 
 Freeze ten questions per project before tuning. Use two projects and include identifiers, paraphrases, code and notes together, and source conflicts.
