@@ -796,3 +796,39 @@ test('scores only complete live text evidence in the first five results', { time
   assert.ok(!JSON.stringify(details).includes(hiddenQuestion));
   assert.ok(!JSON.stringify(details).includes('The pairMarker applies'));
 });
+
+test('ends a stalled score run without printing private data', { timeout: 12000 }, t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'demo', fixture.checkout);
+  const manifest = join(fixture.work, 'private', 'cases.json');
+  writeFileSync(manifest, JSON.stringify({ cases: [{
+    id: 'private-case', projectId: 'demo', question: 'Private fixture question', query: 'private-query', mode: 'literal',
+    requires: [{ rootId: 'code', relativePath: 'private-file.ts', startLine: 1, endLine: 1 }]
+  }] }), { mode: 0o600 });
+
+  const bin = join(fixture.work, 'bin');
+  const pidFile = join(fixture.work, 'server-pid');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'git'), `#!${process.execPath}
+const { writeFileSync } = require('node:fs');
+writeFileSync(${JSON.stringify(pidFile)}, String(process.ppid));
+setTimeout(() => process.exit(1), 5000);
+`, { mode: 0o700 });
+  const clock = join(fixture.work, 'clock.mjs');
+  writeFileSync(clock, `
+const schedule = globalThis.setTimeout;
+globalThis.setTimeout = (callback, ms, ...args) => schedule(callback, ms === 30_000 ? 2_000 : ms, ...args);
+`);
+
+  const script = fileURLToPath(new URL('../scripts/score-retrieval.ts', import.meta.url));
+  const result = spawnSync(process.execPath, [script, '--registry', fixture.registry, '--manifest', manifest], {
+    cwd: fixture.work, timeout: 9000, encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, NODE_OPTIONS: `--import=${clock}` }
+  });
+  const serverPid = Number(readFileSync(pidFile, 'utf8'));
+  assert.equal(result.status, 1, result.stderr || result.error?.message || 'Expected a timeout failure.');
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /did not reply/);
+  assert.doesNotMatch(result.stderr, /private-case|private-query|private-file|Private fixture question/);
+  assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
+});

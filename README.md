@@ -164,13 +164,13 @@ node scripts/score-retrieval.ts --registry /absolute/path/to/projects.json \
 
 The scorer sends one fixed query per case to `search_project`. Each required range must fit within one live text citation in the first five results.
 
-The default JSON reports the score, case count, and p95 MCP round-trip latency in milliseconds. Add `--details` for a private report with case IDs, times, and missing ranges.
+The scorer stops if Margin takes over 30 seconds to reply. The default JSON reports the score, case count, and p95 MCP round-trip latency in milliseconds. Add `--details` for a private report with case IDs, times, and missing ranges.
 
 Use a fresh Codex session for each project. Check that it connects the implementation to its requirement and explains conflicting evidence.
 
 Edit a cited file and switch a checkout to a different Git revision. Check that search drops stale citations before refresh.
 
-For a hybrid comparison, use the same cases, snapshots, and hardware. Require three recovered misses, every baseline exact match, p95 at or below 125% of baseline, and zero added per-query provider cost.
+For a hybrid comparison, use the same cases, snapshots, and hardware. Require at least three recovered misses and preserve every baseline exact match. Cap p95 at 125% of baseline and require zero added per-query provider cost.
 
 Count refresh interruptions only when manual refresh restores the expected evidence. Consider automatic refresh after three distinct interruptions across at least two sessions. Test whether the proposed trigger would have prevented them.
 

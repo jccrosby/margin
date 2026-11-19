@@ -8,6 +8,8 @@ import { z } from 'zod';
 import { id } from '../src/registry.ts';
 
 const limit = 5;
+const requestTimeoutMs = 30_000;
+class RequestTimeout extends Error {}
 const line = z.number().int().positive();
 const requiredCitation = z.strictObject({
   rootId: id, relativePath: z.string().min(1), startLine: line, endLine: line
@@ -31,7 +33,7 @@ const responseSchema = z.object({
 async function score(registry: string, manifest: z.infer<typeof manifestSchema>) {
   const margin = fileURLToPath(new URL('../src/margin.ts', import.meta.url));
   const child = spawn(process.execPath, [margin, '--registry', registry, 'serve'], {
-    stdio: ['pipe', 'pipe', 'ignore']
+    stdio: ['pipe', 'pipe', 'ignore'], detached: true
   });
   const messages = createInterface({ input: child.stdout });
   child.on('error', () => messages.close());
@@ -45,12 +47,20 @@ async function score(registry: string, manifest: z.infer<typeof manifestSchema>)
     });
     async function request(method: string, params: Record<string, unknown>) {
       const id = ++sequence;
-      await send({ id, method, params });
-      const { value, done } = await responses.next();
-      if (done) throw new Error('Margin ended before replying.');
-      const reply = JSON.parse(value);
-      if (reply.id !== id || reply.error || !reply.result) throw new Error('Margin returned an invalid reply.');
-      return reply.result;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => reject(new RequestTimeout()), requestTimeoutMs);
+        });
+        const response = send({ id, method, params }).then(() => responses.next());
+        const { value, done } = await Promise.race([response, timeout]);
+        if (done) throw new Error('Margin ended before replying.');
+        const reply = JSON.parse(value);
+        if (reply.id !== id || reply.error || !reply.result) throw new Error('Margin returned an invalid reply.');
+        return reply.result;
+      } finally {
+        clearTimeout(deadline);
+      }
     }
     await request('initialize', {
       protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'margin-retrieval-scorer', version: '1' }
@@ -73,7 +83,14 @@ async function score(registry: string, manifest: z.infer<typeof manifestSchema>)
     return cases;
   } finally {
     messages.close();
-    child.kill();
+    if (child.pid !== undefined) {
+      try {
+        // fix: Stop the server and any Git command it launched.
+        process.kill(-child.pid, 'SIGKILL');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      }
+    }
   }
 }
 
@@ -91,8 +108,12 @@ try {
     score: cases.filter(item => item.passed).length, total: cases.length, p95Ms,
     ...(details ? { cases } : {})
   }));
-} catch {
-  console.error('Could not score retrieval. Check the Margin server, registry, and private manifest.');
-  console.error('Usage: node scripts/score-retrieval.ts --registry <absolute-path> --manifest <absolute-path> [--details]');
+} catch (error) {
+  if (error instanceof RequestTimeout) {
+    console.error(`Margin did not reply within ${requestTimeoutMs / 1000} seconds.`);
+  } else {
+    console.error('Could not score retrieval. Check the Margin server, registry, and private manifest.');
+    console.error('Usage: node scripts/score-retrieval.ts --registry <absolute-path> --manifest <absolute-path> [--details]');
+  }
   process.exitCode = 1;
 }
