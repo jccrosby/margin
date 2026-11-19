@@ -752,3 +752,47 @@ process.exit(ffmpeg.status ?? 1);
   assert.equal(result.content[1].mimeType, 'image/png');
   assert.equal((await open({ location: frame.location })).content[1].data, result.content[1].data);
 });
+
+test('scores only complete live text evidence in the first five results', { timeout: 15000 }, t => {
+  const fixture = setup(t);
+  for (const position of [1, 2, 3, 4, 5, 6]) {
+    writeFileSync(join(fixture.checkout, `private-${position}.ts`), 'const windowMarker = true;\n');
+  }
+  const code = join(fixture.checkout, 'private-feature.ts');
+  const stale = join(fixture.checkout, 'private-stale.ts');
+  writeFileSync(code, 'const pairMarker = true;\n');
+  writeFileSync(join(fixture.notes, 'private-policy.md'), 'The pairMarker applies to the fixture.\n');
+  writeFileSync(stale, 'const retiredMarker = true;\n');
+  fixture.cli('register', 'demo', fixture.checkout, fixture.notes);
+  fixture.cli('refresh', 'demo');
+  writeFileSync(stale, '// The setting has changed.\n');
+
+  const required = (relativePath, rootId = 'code', endLine = 1) => ({ rootId, relativePath, startLine: 1, endLine });
+  const hiddenQuestion = 'A synthetic private question';
+  const cases = [
+    { id: 'pair', query: 'pairMarker', requires: [required('private-feature.ts'),
+      required('private-policy.md', 'notes')], governs: 'The policy governs.' },
+    { id: 'sixth', query: 'windowMarker', requires: [required('private-6.ts')] },
+    { id: 'partial', query: 'pairMarker', requires: [required('private-feature.ts', 'code', 2)] },
+    { id: 'stale', query: 'retiredMarker', requires: [required('private-stale.ts')] },
+    { id: 'path-only', query: 'private-feature.ts', requires: [required('private-feature.ts')] }
+  ].map(item => ({ ...item, projectId: 'demo', question: hiddenQuestion, mode: 'literal' }));
+  const manifest = join(fixture.work, 'private', 'cases.json');
+  writeFileSync(manifest, JSON.stringify({ cases }), { mode: 0o600 });
+  const script = fileURLToPath(new URL('../scripts/score-retrieval.ts', import.meta.url));
+  const runScore = (...args) => run(fixture.work, process.execPath, script,
+    '--registry', fixture.registry, '--manifest', manifest, ...args);
+  const output = runScore();
+  const summary = JSON.parse(output);
+  assert.deepEqual(Object.keys(summary).sort(), ['p95Ms', 'score', 'total']);
+  assert.equal(summary.score, 1);
+  assert.equal(summary.total, 5);
+  assert.ok(Number.isFinite(summary.p95Ms) && summary.p95Ms >= 0);
+  const details = JSON.parse(runScore('--details'));
+  assert.deepEqual(details.cases.map(({ id, passed, missing }) => ({ id, passed, missing })), [
+    { id: 'pair', passed: true, missing: [] },
+    ...cases.slice(1).map(({ id, requires }) => ({ id, passed: false, missing: requires }))
+  ]);
+  assert.ok(!JSON.stringify(details).includes(hiddenQuestion));
+  assert.ok(!JSON.stringify(details).includes('The pairMarker applies'));
+});
