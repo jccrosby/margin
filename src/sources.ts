@@ -78,8 +78,16 @@ export function requireRoot(root: Root) {
 
 function regularFile(root: Root, relativePath: string) {
   try {
-    const path = join(root.path, relativePath);
-    if (realpathSync.native(path) === path && lstatSync(path).isFile()) return path;
+    const segments = relativePath.split('/');
+    let path = root.path;
+    for (const directory of segments.slice(0, -1)) {
+      path = join(path, directory);
+      if (!lstatSync(path).isDirectory()) return undefined;
+    }
+    path = join(root.path, relativePath);
+    if (!lstatSync(path).isFile()) return undefined;
+    if (root.kind === 'context' && realpathSync.native(path) !== path) return undefined;
+    return path;
   } catch {
     return undefined;
   }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -190,4 +190,40 @@ test('reads live whole lines from both roots and rejects references outside them
   writeFileSync(join(relocated, 'requirement.md'), 'Revised.\n');
   fixture.cli('register', 'alpha', fixture.checkout, relocated);
   assert.deepEqual(await read(note.sourceId), { ...note, startLine: 1, endLine: 1, text: 'Revised.\n' });
+});
+
+test('register rejects registry paths inside a checkout, including case aliases', t => {
+  const fixture = setup(t);
+  const alias = join(fixture.work, 'CHECKOUT');
+  const candidateRoots = existsSync(alias) ? [fixture.checkout, alias] : [fixture.checkout];
+  for (const checkout of candidateRoots) {
+    const registry = join(checkout, 'private', 'projects.json');
+    const result = spawnSync(process.execPath, [
+      entry, '--registry', registry, 'register', 'alpha', fixture.checkout, fixture.notes
+    ], { cwd: fixture.work, encoding: 'utf8' });
+    assert.equal(result.status, 1, result.stdout || result.stderr);
+    assert.match(result.stderr, /Put the registry outside the source roots/);
+    assert.equal(existsSync(join(fixture.checkout, 'private')), false);
+  }
+});
+
+test('reads a source whose Git path uses a different Unicode form', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const diskName = 'cafe\u0301.ts';
+  const gitName = 'caf\u00e9.ts';
+  writeFileSync(join(fixture.checkout, diskName), 'export const fixture = true;\n');
+  fixture.git('config', 'core.precomposeUnicode', 'true');
+  if (!existsSync(join(fixture.checkout, gitName)) ||
+      fixture.git('ls-files', '-z', '--others') !== gitName + '\0' ||
+      !readdirSync(fixture.checkout).includes(diskName)) {
+    t.skip('Git and the filesystem use the same Unicode form.');
+    return;
+  }
+  fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
+  const client = await connect(t, fixture);
+  const { sources: [source] } = await client.call('list_sources', { projectId: 'alpha' });
+  assert.equal(source?.relativePath, gitName);
+  assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId: source.sourceId }), {
+    ...source, startLine: 1, endLine: 1, text: 'export const fixture = true;\n'
+  });
 });

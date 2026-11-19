@@ -30,7 +30,7 @@ export function loadRegistry(path: string) {
 
 function canonicalLocation(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || lstatOrMissing(path)) throw error;
     return join(canonicalLocation(dirname(path)), relative(dirname(path), path));
