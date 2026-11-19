@@ -142,7 +142,7 @@ async function serve(registryPath: string) {
 
   tool('open_evidence', 'Open document, image, video, or link evidence. ' +
     'Pass both contentHash and location to reopen a citation. For a new image or frame, omit both. ' +
-    'Use atSeconds to select a video frame.', z.strictObject({
+    'Use atSeconds to select a video frame. Consult the original clip for motion.', z.strictObject({
     projectId: id, sourceId: z.string(), contentHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
     location: evidenceLocation.optional(), atSeconds: z.number().finite().nonnegative().optional()
   }), ({ projectId, sourceId, contentHash, location, atSeconds }, images) => {

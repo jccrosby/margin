@@ -47,30 +47,36 @@ export async function fetchEvidence(approvedUrl: string, approvals: string[]) {
       approvalsUsed: requested, items: [], errors: []
     };
     const mediaType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
+    let sourceText;
     try {
-      evidence.items = linkItems(bytes, mediaType, evidence.errors);
+      const parsed = linkItems(bytes, mediaType, evidence.errors);
+      evidence.items = parsed.items;
+      sourceText = parsed.sourceText;
+      if (sourceText !== undefined) evidence.lineBased = true;
       if (!evidence.items.length && !evidence.errors.length) evidence.errors.push('no_extractable_text');
     } catch (error) {
       evidence.errors.push(error instanceof MarginError ? error.message : 'extraction_failed');
     }
-    return { digest: contentHash(bytes), evidence };
+    return { digest: contentHash(bytes), evidence, sourceText };
   }
   throw new MarginError('redirect_limit');
 }
 
-function linkItems(bytes: Buffer, mediaType: string | undefined, errors: string[]): EvidenceItem[] {
+function linkItems(bytes: Buffer, mediaType: string | undefined, errors: string[]):
+  { items: EvidenceItem[]; sourceText?: string } {
   if (mediaType === 'text/html' || mediaType === 'application/pdf') {
-    const items = extractDocument(bytes, mediaType === 'text/html' ? '.html' : '.pdf');
+    const items = extractDocument(bytes, mediaType === 'text/html' ? '.html' : '.pdf', errors);
     if (items.some(item => Buffer.byteLength(item.text!) > maxBytes)) errors.push('evidence_too_large');
-    return items.filter(item => Buffer.byteLength(item.text!) <= maxBytes);
+    return { items: items.filter(item => Buffer.byteLength(item.text!) <= maxBytes) };
   }
   if (mediaType === 'text/plain' || mediaType === 'text/markdown' || mediaType === 'application/json') {
-    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-    const lines = textLines(text);
+    const sourceText = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    const lines = textLines(sourceText);
     const sizes = lines.map(line => Buffer.byteLength(line));
     if (sizes.some(size => size > maxBytes)) errors.push('line_too_long');
-    return Array.from(rankedPassages(lines, sizes), ({ startLine, endLine, text }) =>
+    const items = Array.from(rankedPassages(lines, sizes), ({ startLine, endLine, text }): EvidenceItem =>
       ({ kind: 'extracted_text', location: { startLine, endLine }, text }));
+    return { items, sourceText };
   }
   throw new MarginError('unsupported_content_type');
 }

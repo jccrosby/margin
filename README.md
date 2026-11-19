@@ -108,7 +108,7 @@ Search checks each local hit against the entire live file. If the file changed o
 
 To reopen a citation, send its `projectId`, `sourceId`, `contentHash`, and `location` to `open_evidence`. If the source changes, refresh and search again.
 
-To request a frame, send the video source ID and `atSeconds`. The result cites the timestamp of the selected frame.
+To request a frame, send the video source ID and `atSeconds`. The result cites the timestamp of the selected frame. Consult the original clip for motion.
 
 Image and frame results include an MCP image block. Use an image-capable model to inspect it. Codex CLI 0.167.0 shows a returned-image marker in the terminal transcript.
 

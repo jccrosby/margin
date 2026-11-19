@@ -562,13 +562,22 @@ test('opens a versioned physical PDF page and reports a saved citation stale aft
   const env = fixtureDocling(fixture.work, {
     texts: [
       { label: 'text', text: 'The first physical page.', prov: [{ page_no: 1 }] },
-      { label: 'text', text: 'Maple owls require a blue marker.', prov: [{ page_no: 2 }] }
+      { label: 'text', text: 'Maple owls require a blue marker.', prov: [{ page_no: 2 }] },
+      { label: 'text', text: 'An unplaced paragraph.' },
+      { label: 'caption', text: 'Cited figure Unplaced figure', prov: [
+        { page_no: 2, charspan: [0, 12] }, { page_no: 3 }
+      ] }
     ]
   });
   const refresh = runWithEnv(fixture, env, 'refresh', 'demo');
-  assert.equal(refresh.status, 0, refresh.stderr || refresh.stdout);
+  assert.equal(refresh.status, 1, refresh.stderr || refresh.stdout);
   const client = await connect(t, fixture);
-  const { hits: [hit] } = await client.call('search_project', { projectId: 'demo', query: 'maple owls' });
+  const { hits: [hit], coverage } = await client.call('search_project', { projectId: 'demo', query: 'maple owls' });
+  assert.deepEqual(coverage.roots[0].gaps, [{ error: 'citation_unavailable', relativePath: 'reference.pdf' }]);
+  const { hits: [caption] } = await client.call('search_project', { projectId: 'demo', query: 'figure' });
+  assert.deepEqual([caption.kind, caption.location, caption.text],
+    ['caption', { page: 2, item: 4 }, 'Cited figure']);
+  assert.deepEqual((await client.call('search_project', { projectId: 'demo', query: 'unplaced' })).hits, []);
   assert.equal(hit.kind, 'extracted_text');
   assert.deepEqual(hit.location, { page: 2, item: 2 });
   assert.equal(hit.text, 'Maple owls require a blue marker.');
@@ -631,6 +640,7 @@ test('fetches approved redirects and stops before an unapproved target', { timeo
   const fixture = setup(t);
   const requests = join(fixture.work, 'requests.log');
   const shim = join(fixture.work, 'fetch-fixture.mjs');
+  const lineText = 'other\n'.repeat(39) + 'boundary-start\nboundary-end\n' + 'x'.repeat(32769) + 'overlong';
   writeFileSync(shim, `
 import { appendFileSync } from 'node:fs';
 globalThis.fetch = async (url, { redirect }) => {
@@ -639,6 +649,7 @@ globalThis.fetch = async (url, { redirect }) => {
   const path = new URL(url).pathname;
   if (path === '/redirect') return Response.redirect('https://example.test/approved');
   if (path === '/blocked') return Response.redirect('https://example.test/private');
+  if (path === '/lines') return new Response(${JSON.stringify(lineText)}, { headers: { 'content-type': 'text/plain' } });
   if (path === '/approved') return new Response('A synthetic limit of seven.', {
     headers: { 'content-type': 'text/plain' }
   });
@@ -648,7 +659,7 @@ globalThis.fetch = async (url, { redirect }) => {
   fixture.cli('register', 'demo', fixture.checkout);
   fixture.cli('register', 'other', fixture.checkout);
   fixture.cli('approve-url', 'other', 'https://example.test/private');
-  for (const path of ['redirect', 'approved', 'blocked']) {
+  for (const path of ['redirect', 'approved', 'blocked', 'lines']) {
     fixture.cli('approve-url', 'demo', `https://example.test/${path}`);
   }
   const started = new Date().toISOString();
@@ -657,7 +668,7 @@ globalThis.fetch = async (url, { redirect }) => {
   assert.ok(JSON.parse(refresh.stdout).roots.flatMap(root => root.gaps)
     .some(gap => gap.error === 'redirect_not_approved' && gap.relativePath === 'https://example.test/blocked'));
   assert.deepEqual(readFileSync(requests, 'utf8').trim().split('\n').map(url => new URL(url).pathname),
-    ['/redirect', '/approved', '/approved', '/blocked']);
+    ['/redirect', '/approved', '/approved', '/blocked', '/lines']);
   const client = await connect(t, fixture);
   const { hits } = await client.call('search_project', { projectId: 'demo', query: 'synthetic limit' });
   const redirected = hits.find(hit => hit.approvedUrl === 'https://example.test/redirect');
@@ -670,6 +681,17 @@ globalThis.fetch = async (url, { redirect }) => {
   const open = projectId => client.call('open_evidence', { projectId, sourceId, contentHash, location });
   assert.equal((await open('demo')).text, 'A synthetic limit of seven.');
   assert.deepEqual(await open('other'), { error: 'source_unavailable' });
+  const searchLiteral = query => client.call('search_project', { projectId: 'demo', query, mode: 'literal' });
+  const { hits: [crossing] } = await searchLiteral('boundary-start\nboundary-end');
+  assert.deepEqual(crossing.location, { startLine: 40, endLine: 41 });
+  const reopened = await client.call('open_evidence', {
+    projectId: 'demo', sourceId: crossing.sourceId, contentHash: crossing.contentHash, location: crossing.location
+  });
+  assert.equal(reopened.text, 'boundary-start\nboundary-end\n');
+  const missing = await searchLiteral('overlong');
+  assert.deepEqual(missing.hits, []);
+  assert.ok(missing.coverage.roots.flatMap(root => root.gaps).some(gap =>
+    gap.error === 'citation_unavailable' && gap.relativePath === 'https://example.test/lines'));
 });
 
 test('opens the original image when no OCR text can be extracted', { timeout: 10000 }, async t => {
@@ -695,7 +717,7 @@ test('opens the original image when no OCR text can be extracted', { timeout: 10
 });
 
 test('opens a timed transcript and reports the actual selected frame timestamp', { timeout: 15000 }, async t => {
-  if (spawnSync('ffmpeg', ['-version']).error?.code === 'ENOENT') {
+  if (['ffmpeg', 'ffprobe'].some(command => spawnSync(command, ['-version']).error?.code === 'ENOENT')) {
     t.skip('FFmpeg is unavailable.');
     return;
   }
@@ -706,7 +728,17 @@ test('opens a timed transcript and reports the actual selected frame timestamp',
     '-i', subtitles, '-c:v', 'mpeg4', '-c:s', 'mov_text', join(fixture.checkout, 'demo.mp4'));
   fixture.cli('register', 'demo', fixture.checkout);
   fixture.cli('refresh', 'demo');
-  const client = await connect(t, fixture);
+  const ffmpeg = run(fixture.work, '/bin/sh', '-c', 'command -v ffmpeg').trim();
+  const bin = join(fixture.work, 'bin');
+  mkdirSync(bin);
+  const noise = '[unrelated @ 0x1] config in time_base: 1/1\n[unrelated @ 0x1] n: 0 pts: 53\n';
+  writeFileSync(join(bin, 'ffmpeg'), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+process.stderr.write(${JSON.stringify(noise)});
+const ffmpeg = spawnSync(${JSON.stringify(ffmpeg)}, process.argv.slice(2), { stdio: 'inherit' });
+process.exit(ffmpeg.status ?? 1);
+`, { mode: 0o700 });
+  const client = await connect(t, { ...fixture, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
   const { hits: [hit] } = await client.call('search_project', { projectId: 'demo', query: 'blue sign' });
   assert.equal(hit.kind, 'transcript');
   assert.deepEqual(hit.location, { startSeconds: 0.5, endSeconds: 1.8 });

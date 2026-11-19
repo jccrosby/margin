@@ -6,7 +6,7 @@ import {
   type Evidence, type EvidenceItem, type Retrieval
 } from './evidence.ts';
 import { fetchEvidence, linksId } from './links.ts';
-import { literalPassages, rankedPassages, textLines } from './passages.ts';
+import { literalPassages, passageAtLines, rankedPassages, textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
 import { canonicalLocation, checkOutsideRoots, MarginError, type Project, type Root } from './registry.ts';
 import { requireListedSource, requireSource, scanPaths, sourceId } from './sources.ts';
@@ -235,18 +235,23 @@ async function getLinks(urls: string[]) {
 
 function publishLinks(db: DatabaseSync, root: IndexRoot, key: string, { successes, gaps }: Awaited<ReturnType<typeof getLinks>>) {
   db.prepare('DELETE FROM sources WHERE rootKey = ?').run(key);
-  for (const [url, { digest, evidence }] of successes) saveEvidence(db, root.id, key, url, digest, evidence);
+  for (const [url, { digest, evidence, sourceText }] of successes) {
+    saveEvidence(db, root.id, key, url, digest, evidence, sourceText);
+  }
   publishStatus(db, key, gaps);
 }
 
-function saveEvidence(db: DatabaseSync, rootId: string, key: string, path: string, digest: string, evidence: Evidence) {
+function saveEvidence(db: DatabaseSync, rootId: string, key: string, path: string, digest: string,
+  evidence: Evidence, sourceText?: string) {
   const addSource = db.prepare('INSERT INTO sources(rootId, rootKey, relativePath, hash, text) VALUES (?, ?, ?, ?, ?)');
-  const { lastInsertRowid } = addSource.run(rootId, key, path, digest, evidence.items.map(item => item.text ?? '').join('\n'));
+  const { lastInsertRowid } = addSource.run(rootId, key, path, digest,
+    sourceText ?? evidence.items.map(item => item.text ?? '').join('\n'));
   db.prepare('INSERT INTO evidence(source, data) VALUES (?, ?)').run(lastInsertRowid, JSON.stringify(evidence));
   const addRange = db.prepare('INSERT INTO ranges(source, startLine, endLine, text) VALUES (?, ?, ?, ?)');
   // feat: Store the item position for evidence ranges so search can recover its locator.
-  for (const [position, item] of evidence.items.entries()) {
-    if (item.text) addRange.run(lastInsertRowid, position + 1, position + 1, item.text);
+  for (const [index, item] of evidence.items.entries()) {
+    const itemPosition = index + 1;
+    if (item.text) addRange.run(lastInsertRowid, itemPosition, itemPosition, item.text);
   }
 }
 
@@ -326,9 +331,12 @@ export function indexCoverage(registryPath: string, projectId: string, roots: In
 
 function storedEvidence(db: DatabaseSync | undefined, rootId: string, key: string, relativePath: string) {
   if (!db?.prepare("SELECT 1 FROM sqlite_master WHERE name = 'evidence'").get()) return undefined;
-  const row = db.prepare(`SELECT s.hash, e.data FROM sources s JOIN evidence e ON e.source = s.id
+  const row = db.prepare(`SELECT s.hash, s.text, e.data FROM sources s JOIN evidence e ON e.source = s.id
     WHERE s.rootId = ? AND s.rootKey = ? AND s.relativePath = ?`).get(rootId, key, relativePath);
-  if (row) return { contentHash: row.hash as string, evidence: JSON.parse(row.data as string) as Evidence };
+  if (row) {
+    const evidence = JSON.parse(row.data as string) as Evidence;
+    return { contentHash: row.hash as string, evidence, sourceText: evidence.lineBased ? row.text as string : undefined };
+  }
 }
 
 export function openEvidence(registryPath: string, projectId: string, root: IndexRoot, allRoots: Root[],
@@ -345,7 +353,14 @@ export function openEvidence(registryPath: string, projectId: string, root: Inde
     if (!indexed || !allowsRetrieval(root.urls, indexed.evidence)) throw new MarginError('refresh_required');
     const { contentHash, evidence } = indexed;
     if (requestedHash && requestedHash !== contentHash) throw new MarginError('stale_citation');
-    const item = selectEvidence(evidence, location, item => item.text !== undefined);
+    let item: EvidenceItem | undefined;
+    if (indexed.sourceText !== undefined && location && 'startLine' in location) {
+      const text = passageAtLines(indexed.sourceText, location.startLine, location.endLine);
+      if (text === undefined) throw new MarginError('evidence_unavailable');
+      item = { kind: 'extracted_text', location, text };
+    } else {
+      item = selectEvidence(evidence, location, item => item.text !== undefined);
+    }
     return { data: { ...source, contentHash, ...evidence.retrieval, failures: evidence.errors,
       ...(item ?? { kind: 'link', location: {} }) } };
   }
@@ -446,7 +461,7 @@ export function searchProject(registryPath: string, projectId: string, roots: In
     const hits: Hit[] = [];
     if (db) {
       const verified = new Map<string, boolean>();
-      const snapshots = new Map<string, Evidence | undefined>();
+      const snapshots = new Map<string, ReturnType<typeof storedEvidence>>();
       for (const { rootKey: key, hash: expected, ...candidate } of candidates(db, query, mode)) {
         const { rootId, relativePath } = candidate;
         const root = roots.find(root => root.id === rootId && rootKey(root) === key);
@@ -466,10 +481,11 @@ export function searchProject(registryPath: string, projectId: string, roots: In
         }
         if (root.kind === 'links' || evidenceFormat(relativePath)) {
           if (!snapshots.has(cacheKey)) {
-            snapshots.set(cacheKey, storedEvidence(db, rootId, key, relativePath)?.evidence);
+            snapshots.set(cacheKey, storedEvidence(db, rootId, key, relativePath));
           }
-          const stored = snapshots.get(cacheKey);
-          if (!stored) continue;
+          const snapshot = snapshots.get(cacheKey);
+          if (!snapshot) continue;
+          const { evidence: stored, sourceText } = snapshot;
           if (root.kind === 'links' && !allowsRetrieval(root.urls, stored)) {
             recordGap(coverage, rootId, { error: 'redirect_not_approved', relativePath });
             continue;
@@ -482,9 +498,20 @@ export function searchProject(registryPath: string, projectId: string, roots: In
             const kind: EvidenceItem['kind'] = root.kind === 'links' ? 'link' : 'source';
             const cite = item ? { kind: item.kind, location: item.location } : { kind, location: {} };
             hits.push({ ...source, matchedOn, ...cite });
+          } else if (mode === 'literal' && sourceText !== undefined) {
+            for (const passage of literalPassages(sourceText, query)) {
+              if (!passage) {
+                recordGap(coverage, rootId, { error: 'citation_unavailable', relativePath });
+                continue;
+              }
+              const { text, ...location } = passage;
+              hits.push({ ...source, matchedOn: 'text', kind: 'extracted_text', location, text });
+              if (hits.length === limit) break;
+            }
           } else {
-            const items = mode === 'ranked' && 'startLine' in candidate
-              ? [stored.items[candidate.startLine - 1]]
+            const itemPosition = 'startLine' in candidate ? candidate.startLine : undefined;
+            const items = mode === 'ranked' && itemPosition !== undefined
+              ? [stored.items[itemPosition - 1]]
               : stored.items.filter(item => item.text?.includes(query));
             for (const item of items) {
               if (!item) continue;

@@ -7,6 +7,14 @@ export function textLines(text: string) {
   return text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
 }
 
+export function passageAtLines(text: string, startLine: number, endLine: number) {
+  if (endLine < startLine || endLine - startLine >= maxLines) return undefined;
+  const lines = textLines(text);
+  if (endLine > lines.length) return undefined;
+  const passage = lines.slice(startLine - 1, endLine).join('');
+  return Buffer.byteLength(passage) <= maxBytes ? passage : undefined;
+}
+
 function passageEnd(sizes: number[], start: number) {
   let end = start;
   let bytes = 0;

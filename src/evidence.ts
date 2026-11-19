@@ -37,7 +37,9 @@ export type EvidenceItem = {
   text?: string;
 };
 
-export type Evidence = { items: EvidenceItem[]; errors: string[]; retrieval?: Retrieval; approvalsUsed?: string[] };
+export type Evidence = {
+  items: EvidenceItem[]; errors: string[]; retrieval?: Retrieval; approvalsUsed?: string[]; lineBased?: true
+};
 export type Retrieval = { approvedUrl: string; finalUrl: string; retrievedAt: string };
 export type ImageBlock = { type: 'image'; mimeType: string; data: string };
 
@@ -82,9 +84,9 @@ const doclingOutput = z.object({
     text: z.string(),
     level: ordinal.optional(),
     prov: z.array(z.object({
-      page_no: ordinal,
-      charspan: z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]).optional()
-    })).optional()
+      page_no: ordinal.optional().catch(undefined),
+      charspan: z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]).optional().catch(undefined)
+    }).catch({})).optional()
   }))
 });
 
@@ -100,7 +102,7 @@ function docling(bytes: Buffer, extension: string) {
   });
 }
 
-export function extractDocument(bytes: Buffer, extension: string): EvidenceItem[] {
+export function extractDocument(bytes: Buffer, extension: string, errors: string[]): EvidenceItem[] {
   const headings: string[] = [];
   const format = evidenceFormat(`source${extension}`);
   return docling(bytes, extension).flatMap(({ label, text, level, prov }, index): EvidenceItem[] => {
@@ -111,20 +113,33 @@ export function extractDocument(bytes: Buffer, extension: string): EvidenceItem[
       headings[depth - 1] = text;
     }
     if (!text.trim()) return [];
+    const kind = label === 'caption' ? 'caption' : format === 'image' ? 'ocr' : 'extracted_text';
     if (format === 'pdf') {
-      const pages = new Set(prov?.map(entry => entry.page_no));
-      if (pages.size === 1) return [{ kind: 'extracted_text', location: { page: [...pages][0], item }, text }];
+      const pages = new Set(prov?.map(entry => entry.page_no).filter(page => page !== undefined));
+      if (pages.size === 1 && prov?.every(entry => entry.page_no !== undefined)) {
+        return [{ kind, location: { page: [...pages][0], item }, text }];
+      }
       const characters = Array.from(text);
-      return Array.from(pages).flatMap(page => {
-        const passage = (prov ?? []).filter(entry => entry.page_no === page && entry.charspan)
-          .map(({ charspan }) => characters.slice(...charspan!).join('')).join(' ');
-        return passage.trim() ? [{ kind: 'extracted_text', location: { page, item }, text: passage }] : [];
-      });
+      const passages = new Map<number, string[]>();
+      const cited = new Uint8Array(characters.length);
+      for (const { page_no: page, charspan } of prov ?? []) {
+        if (page === undefined || !charspan || charspan[0] >= charspan[1] || charspan[1] > characters.length) {
+          continue;
+        }
+        cited.fill(1, ...charspan);
+        const fragment = characters.slice(...charspan).join('');
+        if (!fragment.trim()) continue;
+        const previous = passages.get(page) ?? [];
+        previous.push(fragment);
+        passages.set(page, previous);
+      }
+      if (characters.some((character, index) => !cited[index] && character.trim()) &&
+          !errors.includes('citation_unavailable')) errors.push('citation_unavailable');
+      return Array.from(passages, ([page, fragments]) => ({ kind, location: { page, item }, text: fragments.join(' ') }));
     }
     if (format === 'docx') {
-      return [{ kind: 'extracted_text', location: { headingPath: headings.filter(Boolean), paragraph: item }, text }];
+      return [{ kind, location: { headingPath: headings.filter(Boolean), paragraph: item }, text }];
     }
-    const kind = label === 'caption' ? 'caption' : format === 'image' ? 'ocr' : 'extracted_text';
     return [{ kind, location: format === 'image' ? { image: 1, item } : { item }, text }];
   });
 }
@@ -156,8 +171,8 @@ export function extractEvidence(bytes: Buffer, path: string): Evidence {
   const items: EvidenceItem[] = format === 'image' ? [{ kind: 'image', location: { image: 1 } }] : [];
   const errors: string[] = [];
   try {
-    const extracted = format === 'video' ? transcript(bytes, extension) : extractDocument(bytes, extension);
-    if (!extracted.length) {
+    const extracted = format === 'video' ? transcript(bytes, extension) : extractDocument(bytes, extension, errors);
+    if (!extracted.length && !errors.length) {
       errors.push(format === 'video' ? 'transcript_unavailable' : format === 'image' ? 'ocr_unavailable' : 'no_extractable_text');
     }
     for (const item of extracted) {
@@ -193,8 +208,10 @@ export function videoFrame(bytes: Buffer, path: string, atSeconds: number) {
       '-vf', `select=gte(t\\,${offset.toFixed(9)}),scale=1280:1280:force_original_aspect_ratio=decrease,showinfo`,
       '-frames:v', '1', '-threads', '1', '-c:v', 'png', '-f', 'image2pipe', 'pipe:1'
     ]);
-    const timeBase = stderr.match(/config in time_base: (\d+)\/(\d+)/);
-    const pts = stderr.match(/\bn:\s*0\s+pts:\s*(-?\d+)/);
+    const showinfo = stderr.split('\n')
+      .filter(line => /^(?:\[[^\]]+\]\s*)*\[Parsed_showinfo_\d+ @ [^\]]+\]/.test(line)).join('\n');
+    const timeBase = showinfo.match(/config in time_base: (\d+)\/(\d+)/);
+    const pts = showinfo.match(/\bn:\s*0\s+pts:\s*(-?\d+)/);
     if (!stdout.length || !timeBase || !pts) throw new MarginError('frame_unavailable');
     const timestampSeconds = Number(pts[1]) * Number(timeBase[1]) / Number(timeBase[2]);
     if (!Number.isFinite(timestampSeconds) || timestampSeconds < 0) throw new MarginError('frame_unavailable');
