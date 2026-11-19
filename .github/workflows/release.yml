@@ -1,0 +1,48 @@
+name: Release Margin
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: margin-package-release
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '26'
+          package-manager-cache: false
+          registry-url: https://npm.pkg.github.com
+          scope: '@jccrosby'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Pack and check the release
+        run: |
+          tarball="$RUNNER_TEMP/$(npm pack --silent --pack-destination "$RUNNER_TEMP")"
+          node scripts/check-package.js "$tarball"
+          git rev-parse HEAD
+          shasum -a 256 "$tarball"
+          printf 'MARGIN_TARBALL=%s\n' "$tarball" >> "$GITHUB_ENV"
+      - name: Publish the checked tarball
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          registry=https://npm.pkg.github.com
+          if [[ "$(npm view @jccrosby/margin name --registry "$registry")" != '@jccrosby/margin' ]]; then
+            echo 'Publish the first private version manually and grant this workflow Write access.'
+            exit 1
+          fi
+          npm publish "$MARGIN_TARBALL" --ignore-scripts --registry "$registry"

@@ -4,14 +4,26 @@ Margin lets Codex search, list, and read project files through MCP. It reads Git
 
 ## Install and register a project
 
-Use Node.js 26 LTS and Git on macOS. Run `npm ci` in the Margin checkout.
+Use macOS, Node.js 26, Git, and either pnpm or npm. Ask the package owner for direct **Read** access to `@jccrosby/margin`. Create a classic GitHub token with `read:packages`.
 
-From that checkout, run this command with your own absolute paths.
+Add these lines to your user-level `~/.npmrc`. Replace the placeholder with your token and run `chmod 600 ~/.npmrc`. Use the same file for terminal commands and local Codex. Keep the token out of the repository and Codex configuration. [GitHub Packages authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry)
+
+```ini
+@jccrosby:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=REPLACE_WITH_YOUR_READ_TOKEN
+```
+
+Set the package version to one the owner has published. The commands below use `0.1.0` as an example. Set the registry path once and use it for each command.
 
 ```sh
-node src/margin.ts --registry "$HOME/Library/Application Support/Margin/projects.json" \
+margin_package='@jccrosby/margin@0.1.0'
+margin_registry="$HOME/Library/Application Support/Margin/projects.json"
+
+pnpm dlx "$margin_package" --registry "$margin_registry" \
   register demo /absolute/path/to/checkout /absolute/path/to/notes
 ```
+
+For npm, use `npx --yes "$margin_package"` in place of `pnpm dlx "$margin_package"`. The remaining arguments are the same.
 
 Margin creates a private registry outside your source roots. Use a distinct project ID for each worktree.
 
@@ -24,7 +36,7 @@ Source IDs stay the same for files at the same relative path.
 To add another Git checkout to the same project, use `add-checkout` with a distinct root ID.
 
 ```sh
-node src/margin.ts --registry "$HOME/Library/Application Support/Margin/projects.json" \
+pnpm dlx "$margin_package" --registry "$margin_registry" \
   add-checkout demo extra /absolute/path/to/second-checkout
 ```
 
@@ -35,7 +47,7 @@ Use the same root ID to move that checkout.
 Run a manual refresh after you register a project or change its files.
 
 ```sh
-node src/margin.ts --registry "$HOME/Library/Application Support/Margin/projects.json" refresh demo
+pnpm dlx "$margin_package" --registry "$margin_registry" refresh demo
 ```
 
 Margin keeps a private SQLite index per project next to the registry. The CLI publishes each root in one transaction.
@@ -61,7 +73,7 @@ PDF extraction reads the text layer. Video search uses the first embedded timed 
 Approve each HTTPS URL before running refresh. Margin saves approvals in the private registry.
 
 ```sh
-node src/margin.ts --registry "$HOME/Library/Application Support/Margin/projects.json" \
+pnpm dlx "$margin_package" --registry "$margin_registry" \
   approve-url demo 'https://example.com/requirements'
 ```
 
@@ -71,12 +83,19 @@ Refresh saves searchable text from HTML, PDF, plain text, Markdown, and JSON res
 
 ## Connect Codex
 
-Run this command from the Margin checkout. Use the absolute path to Node if your client runs with a different PATH.
+Choose one launcher and add the server from any directory. Keep the exact package version in your MCP config. To upgrade, change it to the new published version.
 
 ```sh
-codex mcp add margin -- "$(command -v node)" "$PWD/src/margin.ts" \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" serve
+codex mcp add margin -- pnpm dlx "$margin_package" --registry "$margin_registry" serve
 ```
+
+With npm, run this command instead.
+
+```sh
+codex mcp add margin -- npx --yes "$margin_package" --registry "$margin_registry" serve
+```
+
+The local client needs access to Node.js, Git, the launcher, your npm config, and your registered files. Use an absolute launcher path if the client has a different PATH. Other local MCP clients can use the same command and arguments over stdio.
 
 Start a fresh session and name the project ID. Ask Codex to search `demo` for an identifier and find the requirement that explains it.
 
@@ -122,11 +141,13 @@ Margin skips symlinks, dependency and build directories, and common credential f
 
 ## Verify
 
-Run `npm test` and `npm run typecheck` in the Margin checkout. The tests launch the stdio server in a separate directory and use synthetic Git and notes fixtures.
+Run `npm ci`, `npm test`, and `npm run typecheck` in the Margin checkout. The tests launch the stdio server in a separate directory and use synthetic Git and notes fixtures.
 
 The Step 1 check used a fresh Codex CLI 0.167.0 session. Codex read bounded passages from both roots and rejected path escapes and foreign source IDs.
 
 The checkout paths, file hashes, and Git status matched the baseline.
+
+See the [release instructions](https://github.com/jccrosby/margin/blob/main/RELEASING.md) for package checks and publishing.
 
 ## Evaluate retrieval
 
