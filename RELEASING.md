@@ -54,6 +54,14 @@ John Crosby (`jccrosby`) publishes the checked tarball with a short-lived classi
 
 Open the package settings in GitHub. Confirm **Private** visibility and grant readers direct **Read** access. Leave repository permission inheritance off. Under **Manage Actions access**, add `jccrosby/margin` with **Write** access. [GitHub Packages access controls](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)
 
+## Publish later versions
+
+Before opening the release PR, run `npm version <version> --no-git-tag-version`. Commit the changes to `package.json` and `package-lock.json`.
+
+After the release PR merges, open **Actions** in the repository and select **Release Margin**. Click **Run workflow**, select **main**, and click **Run workflow** again. Wait for the run to finish before dispatching another release.
+
+Save the source commit and tarball SHA-256 from the run log. Verify access to the published version before sharing it.
+
 ## Verify access before sharing
 
 Check the exact version, **Private** visibility, and grants on GitHub. Use a different account with a direct **Read** grant for the install checks. Follow the [reader setup](README.md#install-and-register-a-project) for its classic token with `read:packages`.
