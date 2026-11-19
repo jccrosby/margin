@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
@@ -482,4 +482,71 @@ test('an interrupted refresh keeps the last committed index and retry replaces i
   assert.deepEqual(recovered.hits.map(hit => hit.relativePath), ['keep.ts', 'new.ts']);
   writeFileSync(removed, 'removedWord\n');
   assert.equal((await search('removedWord')).hits.length, 0);
+});
+
+test('a literal citation must include the complete match', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const longLine = 'x'.repeat(20000) + ' first\n';
+  const nextLine = 'second ' + 'y'.repeat(20000) + '\n';
+  writeFileSync(join(fixture.checkout, 'large.ts'), longLine + nextLine);
+  writeFileSync(join(fixture.checkout, 'small.ts'), 'first\nsecond\n');
+  writeFileSync(join(fixture.checkout, 'overlap.ts'), 'first\nsecond\n' +
+    'padding\n'.repeat(37) + 'first\nsecond\n');
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('refresh', 'alpha');
+  const client = await connect(t, fixture);
+  const results = await client.call('search_project', {
+    projectId: 'alpha', query: 'first\nsecond', mode: 'literal'
+  });
+  assert.deepEqual(results.hits.map(hit => [hit.relativePath, hit.startLine, hit.endLine]),
+    [['overlap.ts', 1, 40], ['overlap.ts', 40, 41], ['small.ts', 1, 2]]);
+  assert.ok(results.hits.every(hit => hit.text.includes('first\nsecond')));
+  assert.equal(results.coverage.complete, false);
+  assert.deepEqual(results.coverage.roots[0].gaps, [{ error: 'citation_unavailable', relativePath: 'large.ts' }]);
+});
+
+test('readers see the last commit while a refresh spills pages and after it dies', { timeout: 25000 }, async t => {
+  const fixture = setup(t);
+  writeFileSync(join(fixture.checkout, 'keep.ts'), 'fixtureWord\n');
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('refresh', 'alpha');
+  writeFileSync(join(fixture.checkout, 'big.ts'), 'fixtureWord\n' + ('// ' + 'x'.repeat(1000) + '\n').repeat(1200));
+  const before = readdirSync(fixture.checkout, { recursive: true }).sort();
+  const ready = join(fixture.work, 'staged');
+  const preloader = join(fixture.work, 'pause.mjs');
+  writeFileSync(preloader, `import { writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+const execute = DatabaseSync.prototype.exec;
+DatabaseSync.prototype.exec = function (sql) {
+  if (sql === 'BEGIN IMMEDIATE') execute.call(this, 'PRAGMA cache_size = 1; PRAGMA cache_spill = 1');
+  if (sql === 'COMMIT') {
+    writeFileSync(${JSON.stringify(ready)}, '');
+    process.kill(process.pid, 'SIGSTOP');
+  }
+  return execute.call(this, sql);
+};
+`);
+  const child = spawn(process.execPath, ['--import', preloader, entry, '--registry', fixture.registry, 'refresh', 'alpha'],
+    { cwd: fixture.work, stdio: 'ignore' });
+  t.after(() => child.kill('SIGKILL'));
+  const exited = once(child, 'exit');
+  for (let attempt = 0; !existsSync(ready) && attempt < 160; attempt++) await delay(25);
+  assert.equal(existsSync(ready), true);
+  const client = await connect(t, fixture);
+  const search = () => client.call('search_project', { projectId: 'alpha', query: 'fixtureWord', mode: 'literal' });
+  const during = await search();
+  assert.deepEqual(during.hits?.map(hit => hit.relativePath), ['keep.ts'], JSON.stringify(during));
+  child.kill('SIGKILL');
+  const [, signal] = await exited;
+  assert.equal(signal, 'SIGKILL');
+  assert.deepEqual(await search(), during);
+  assert.ok(during.coverage.roots[0].gaps.some(gap => gap.error === 'refresh_unfinished'));
+  const privateDir = dirname(fixture.registry);
+  const sidecars = readdirSync(privateDir).filter(name => /\.sqlite-(shm|wal)$/.test(name));
+  assert.equal(sidecars.length, 2);
+  assert.ok(sidecars.every(name => (statSync(join(privateDir, name)).mode & 0o077) === 0));
+  assert.ok(statSync(join(privateDir, sidecars.find(name => name.endsWith('-wal')))).size > 32768);
+  assert.deepEqual(readdirSync(fixture.checkout, { recursive: true }).sort(), before);
+  fixture.cli('refresh', 'alpha');
+  assert.deepEqual((await search()).hits.map(hit => hit.relativePath), ['big.ts', 'keep.ts']);
 });

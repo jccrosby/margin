@@ -30,16 +30,20 @@ export function* rankedPassages(lines: string[], sizes: number[]) {
 export function* literalPassages(text: string, query: string) {
   const lines = textLines(text);
   const sizes = lines.map(line => Buffer.byteLength(line));
+  let offset = 0;
+  const lineEnds = lines.map(line => offset += line.length);
   let line = 0;
-  let lineOffset = 0;
-  let citedEnd = 0;
+  let citedUntil = 0;
   for (let match = text.indexOf(query); match !== -1; match = text.indexOf(query, match + 1)) {
-    while (lineOffset + lines[line].length <= match) lineOffset += lines[line++].length;
-    if (line < citedEnd) continue;
+    const matchEnd = match + query.length;
+    if (matchEnd <= citedUntil) continue;
+    while (lineEnds[line] <= match) line++;
     const end = passageEnd(sizes, line);
-    if (end > line) {
-      yield { startLine: line + 1, endLine: end, text: lines.slice(line, end).join('') };
-      citedEnd = end;
+    if (end === line || lineEnds[end - 1] < matchEnd) {
+      yield undefined;
+      continue;
     }
+    yield { startLine: line + 1, endLine: end, text: lines.slice(line, end).join('') };
+    citedUntil = lineEnds[end - 1];
   }
 }

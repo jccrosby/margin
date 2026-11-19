@@ -83,8 +83,11 @@ function openIndex(path: string, write: boolean) {
     const db = new DatabaseSync(path, { readOnly: !write, timeout: 5000, enableForeignKeyConstraints: true });
     if (write) {
       try {
-        // fix: Keep readers on the prior index while SQLite stages a root refresh.
-        db.exec('PRAGMA cache_spill = OFF');
+        // fix: WAL lets read-only clients read the last commit after a writer dies.
+        if (db.prepare('PRAGMA journal_mode = WAL').get()?.journal_mode !== 'wal') {
+          throw new MarginError('index_unavailable');
+        }
+        db.exec('PRAGMA synchronous = FULL');
         db.exec(schema);
       } catch (error) {
         db.close();
@@ -278,7 +281,10 @@ function* candidates(db: DatabaseSync, query: string, mode: 'literal' | 'ranked'
     const sources = db.prepare(`SELECT rootId, rootKey, relativePath, hash, text FROM sources
       WHERE instr(text, ?) > 0 ORDER BY rootId, relativePath`).iterate(query) as Iterable<Source>;
     for (const { text, ...source } of sources) {
-      for (const range of literalPassages(text, query)) yield { ...source, ...range, matchedOn: 'text' as const };
+      for (const range of literalPassages(text, query)) {
+        if (range) yield { ...source, ...range, matchedOn: 'text' as const };
+        else yield { ...source, missingCitation: true };
+      }
     }
   }
 }
@@ -302,6 +308,10 @@ export function searchProject(registryPath: string, projectId: string, roots: Ro
           verified.set(cacheKey, verify(root, relativePath, expected, coverage));
         }
         if (!verified.get(cacheKey)) continue;
+        if ('missingCitation' in candidate) {
+          recordGap(coverage, rootId, { error: 'citation_unavailable', relativePath });
+          continue;
+        }
         hits.push({ sourceId: sourceId(projectId, rootId, relativePath), ...candidate });
         if (hits.length === limit) break;
       }
@@ -319,8 +329,12 @@ function verify(root: Root, relativePath: string, expected: string, coverage: Co
   } catch (cause) {
     error = cause instanceof MarginError ? cause.message : 'source_unavailable';
   }
-  const { gaps } = coverage.roots.find(entry => entry.rootId === root.id)!;
-  if (!gaps.some(gap => gap.error === error && gap.relativePath === relativePath)) gaps.push({ error, relativePath });
-  coverage.complete = false;
+  recordGap(coverage, root.id, { error, relativePath });
   return false;
+}
+
+function recordGap(coverage: Coverage, rootId: string, gap: Gap) {
+  const { gaps } = coverage.roots.find(entry => entry.rootId === rootId)!;
+  if (!gaps.some(entry => entry.error === gap.error && entry.relativePath === gap.relativePath)) gaps.push(gap);
+  coverage.complete = false;
 }
