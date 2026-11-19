@@ -15,6 +15,13 @@ margin_tarball=$(
   npm test >&2
   margin_release=$(mktemp -d)
   margin_candidate="$margin_release/$(npm pack --silent --pack-destination "$margin_release")"
+  margin_manifest=$(tar -xOzf "$margin_candidate" package/package.json)
+  node -e '
+    const { ok } = require("node:assert/strict");
+    const manifest = JSON.parse(process.argv[1]);
+    ok(!Object.hasOwn(manifest, "repository"),
+      "Remove the repository field from the first release manifest.");
+  ' "$margin_manifest"
   node scripts/check-package.js "$margin_candidate" >&2
   git rev-parse HEAD >&2
   shasum -a 256 "$margin_candidate" > "$margin_candidate.sha256"
@@ -23,11 +30,11 @@ margin_tarball=$(
 )
 ```
 
-The package check verifies the shipped file list. It installs the archive, registers a synthetic Git project, and checks MCP outside the checkout. The checksum identifies the exact archive that passed.
+The first release check rejects a `repository` field in the packaged manifest. The package check verifies the shipped file list. It installs the archive, registers a synthetic Git project, and checks MCP outside the checkout. The checksum identifies the exact archive that passed.
 
 ## Publish the first version
 
-John Crosby (`jccrosby`) publishes the checked tarball with a short-lived classic token that has `write:packages`. Use the token as the password when npm prompts. Create the package without linking it to the public source repository. Confirm the packaged `package.json` has no `repository` field. The temporary config keeps the publish token separate from your reader token.
+John Crosby (`jccrosby`) publishes the checked tarball with a short-lived classic token that has `write:packages`. Use the token as the password when npm prompts. This creates the package without linking it to the public source repository. The temporary config keeps the publish token separate from your reader token.
 
 ```sh
 (
