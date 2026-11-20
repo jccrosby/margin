@@ -12,6 +12,8 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "prepack": "npm run build",
+    "release:bootstrap": "bash scripts/bootstrap-release.sh",
+    "release:verify": "bash scripts/verify-release.sh",
     "test": "node --test",
     "typecheck": "tsc --noEmit"
   },
