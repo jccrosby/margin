@@ -70,11 +70,22 @@ Copy the whole `.margin-saved-notes` directory to a private backup. Keep its dir
 
 ```sh
 margin_backup=/absolute/path/to/a/new/backup-directory
-margin_saved_notes="$(dirname "$margin_registry")/.margin-saved-notes"
-mkdir -m 700 "$margin_backup" && cp -pR "$margin_saved_notes" "$margin_backup"
+margin_registry_file="$(realpath "$margin_registry")" &&
+  margin_saved_notes="$(dirname "$margin_registry_file")/.margin-saved-notes" &&
+  mkdir -m 700 "$margin_backup" &&
+  cp -pR "$margin_saved_notes" "$margin_backup"
 ```
 
-To restore a missing notes directory, copy the backup next to the registry with `cp -pR`. Use the original registry path and project IDs. Keep directories at mode `0700` and files at mode `0600`.
+To restore a missing notes directory, use the original registry path and project IDs. Keep directories at mode `0700` and files at mode `0600`.
+
+```sh
+margin_backup=/absolute/path/to/the/backup-directory
+margin_registry_file="$(realpath "$margin_registry")" &&
+  margin_saved_notes="$(dirname "$margin_registry_file")/.margin-saved-notes" &&
+  test ! -e "$margin_saved_notes" &&
+  test ! -L "$margin_saved_notes" &&
+  cp -pR "$margin_backup/.margin-saved-notes" "$margin_saved_notes"
+```
 
 Run `refresh` for each restored project. Refresh reads the saved notes even when the project has saves disabled.
 
