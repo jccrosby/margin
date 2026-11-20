@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -32,20 +32,24 @@ function run(cwd, command, ...args) {
   return result.stdout;
 }
 
-async function connect(t, { work, registry, env = process.env }) {
-  const child = spawn(process.execPath, [entry, '--registry', registry, 'serve'], { cwd: work, env });
+async function connect(t, { work, registry, env = process.env, nodeArgs = [] }) {
+  const child = spawn(process.execPath, [...nodeArgs, entry, '--registry', registry, 'serve'], { cwd: work, env });
   const messages = createInterface({ input: child.stdout });
   t.after(() => {
     messages.close();
-    child.kill();
+    child.kill('SIGKILL');
   });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr += chunk; });
   const receive = messages[Symbol.asyncIterator]();
   let sequence = 0;
-  async function request(method, params) {
+  function send(method, params) {
     const id = ++sequence;
     child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    return id;
+  }
+  async function request(method, params) {
+    const id = send(method, params);
     const { value } = await receive.next();
     assert.ok(value, stderr || 'Server closed without replying');
     const message = JSON.parse(value);
@@ -60,6 +64,12 @@ async function connect(t, { work, registry, env = process.env }) {
   });
   child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
   return {
+    sendCall: (name, args) => send('tools/call', { name, arguments: args }),
+    async stop(signal = 'SIGTERM') {
+      const exited = once(child, 'exit');
+      child.kill(signal);
+      return exited;
+    },
     callResult: (name, args) => request('tools/call', { name, arguments: args }),
     listTools: () => request('tools/list'),
     async call(name, args = {}) {
@@ -142,7 +152,8 @@ test('reads live whole lines from both roots and rejects references outside them
   fixture.cli('register', 'beta', fixture.checkout, fixture.notes);
   const client = await connect(t, fixture);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map(tool => tool.name), ['list_projects', 'list_sources', 'read_source', 'search_project', 'open_evidence']);
+  assert.deepEqual(tools.map(tool => tool.name), ['list_projects', 'list_sources', 'read_source', 'search_project', 'open_evidence',
+    'save_project_note']);
   const { sources: [code, note] } = await client.call('list_sources', { projectId: 'alpha' });
   const read = (sourceId, range = {}, projectId = 'alpha') =>
     client.call('read_source', { projectId, sourceId, ...range });
@@ -832,3 +843,313 @@ globalThis.setTimeout = (callback, ms, ...args) => schedule(callback, ms === 30_
   assert.doesNotMatch(result.stderr, /private-case|private-query|private-file|Private fixture question/);
   assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
 });
+
+test('a project must opt in to save notes, including on retry', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
+  const client = await connect(t, fixture);
+  const { tools } = await client.listTools();
+  assert.deepEqual(tools.find(tool => tool.name === 'save_project_note')?.annotations, {
+    readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false
+  });
+
+  const args = { projectId: 'alpha', requestId: 'handoff-1', title: 'Handoff', body: 'Review the playlist.' };
+  const save = values => client.call('save_project_note', { ...args, ...values });
+  const initialFiles = readdirSync(dirname(fixture.registry));
+  assert.deepEqual(await save(), { error: 'note_saves_disabled' });
+  assert.deepEqual(readdirSync(dirname(fixture.registry)), initialFiles);
+
+  fixture.cli('note-saves', 'alpha', 'enable');
+  const saved = await save();
+  assert.equal(typeof saved.noteId, 'string');
+  assert.equal(saved.createdAt, new Date(saved.createdAt).toISOString());
+  fixture.cli('note-saves', 'alpha', 'disable');
+  assert.deepEqual(await save(), { error: 'note_saves_disabled' });
+  fixture.cli('note-saves', 'alpha', 'enable');
+  assert.deepEqual(await save(), saved);
+});
+
+test('a fresh server can find a saved note through list, read, and both search modes',
+  { timeout: 10000 }, async t => {
+    const fixture = setup(t);
+    fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
+    fixture.cli('register', 'beta', fixture.checkout, fixture.notes);
+    fixture.cli('note-saves', 'alpha', 'enable');
+
+    const writer = await connect(t, fixture);
+    const args = { projectId: 'alpha', requestId: '1', title: 'Handoff', body: 'Check the moonstone playlist.' };
+    const { noteId } = await writer.call('save_project_note', args);
+    const reader = await connect(t, fixture);
+    const list = projectId => reader.call('list_sources', { projectId });
+    const read = projectId => reader.call('read_source', { projectId, sourceId: noteId });
+    const search = (projectId, mode) => reader.call('search_project', { projectId, query: 'moonstone', mode });
+    const [{ sourceId, relativePath }] = (await list('alpha')).sources;
+    assert.equal(sourceId, noteId);
+    assert.match((await read('alpha')).text, /# Handoff\n\nCheck the moonstone playlist\.$/);
+    assert.deepEqual((await list('beta')).sources, []);
+    assert.deepEqual(await read('beta'), { error: 'source_unavailable' });
+    for (const mode of ['ranked', 'literal']) {
+      assert.ok((await search('alpha', mode)).hits.some(hit => hit.sourceId === noteId));
+      assert.deepEqual((await search('beta', mode)).hits, []);
+    }
+
+    fixture.cli('refresh', 'alpha');
+    assert.ok((await search('alpha', 'ranked')).hits.some(hit => hit.sourceId === noteId));
+
+    const noteFiles = readdirSync(dirname(fixture.registry), { recursive: true })
+      .filter(path => path.endsWith('.md'));
+    assert.equal(noteFiles.length, 1);
+    const notePath = join(dirname(fixture.registry), noteFiles[0]);
+    assert.equal(notePath.split('/').at(-1), relativePath);
+    writeFileSync(notePath, 'The local account changed this note.');
+    assert.equal((await read('alpha')).text, 'The local account changed this note.');
+    for (const mode of ['ranked', 'literal']) assert.deepEqual((await search('alpha', mode)).hits, []);
+  });
+
+test('retries recover a lost save response and concurrent calls never replace notes', { timeout: 15000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  const writer = await connect(t, fixture);
+  const observer = await connect(t, fixture);
+  const list = () => observer.call('list_sources', { projectId: 'alpha' });
+  fixture.cli('register', 'beta', fixture.checkout);
+  fixture.cli('note-saves', 'beta', 'enable');
+  const args = { projectId: 'alpha', requestId: 'lost-response', title: 'A private handoff', body: 'Record this.' };
+  writer.sendCall('save_project_note', args);
+  let saved;
+  for (let attempt = 0; !saved && attempt < 100; attempt++) {
+    const { sources } = await list();
+    [saved] = sources;
+    if (!saved) await delay(25);
+  }
+  assert.ok(saved, 'The note did not commit');
+  await writer.stop('SIGKILL');
+
+  const { text } = await observer.call('read_source', { projectId: 'alpha', sourceId: saved.sourceId });
+  const metadata = JSON.parse(text.split('\n')[1]);
+  assert.deepEqual(metadata, {
+    noteId: saved.sourceId, projectId: 'alpha', createdAt: metadata.createdAt,
+    requestId: 'lost-response', title: 'A private handoff'
+  });
+  const fresh = await connect(t, fixture);
+  const save = (client, overrides) => client.call('save_project_note', { ...args, ...overrides });
+  assert.deepEqual(await save(fresh),
+    { noteId: saved.sourceId, createdAt: new Date(metadata.createdAt).toISOString() });
+  assert.deepEqual(await save(fresh, { title: 'Different title' }), { error: 'note_request_conflict' });
+  const matching = await Promise.all([save(fresh, { requestId: 'matching' }), save(observer, { requestId: 'matching' })]);
+  assert.ok(matching[0].noteId);
+  assert.deepEqual(matching[1], matching[0]);
+
+  const conflicting = await Promise.all([
+    save(fresh, { requestId: 'conflict', body: 'First' }),
+    save(observer, { requestId: 'conflict', body: 'Second' })
+  ]);
+  const winner = conflicting.findIndex(result => result.noteId);
+  assert.notEqual(winner, -1);
+  assert.deepEqual(conflicting[1 - winner], { error: 'note_request_conflict' });
+  const committed = await observer.call('read_source', { projectId: 'alpha', sourceId: conflicting[winner].noteId });
+  assert.ok(committed.text.endsWith(winner === 0 ? 'First' : 'Second'));
+
+  const distinct = await Promise.all([save(fresh, { requestId: 'left' }), save(observer, { requestId: 'right' })]);
+  const sources = (await list()).sources;
+  const committedIds = [saved.sourceId, matching[0].noteId, conflicting[winner].noteId, ...distinct.map(note => note.noteId)];
+  assert.equal(new Set(committedIds).size, 5);
+  assert.deepEqual(sources.map(source => source.sourceId).sort(), committedIds.sort());
+
+  const firstSaves = await Promise.all([save(fresh, { projectId: 'beta', requestId: 'left' }),
+    save(observer, { projectId: 'beta', requestId: 'right' })]);
+  assert.ok(firstSaves.every(result => result.noteId), JSON.stringify(firstSaves));
+  assert.notEqual(firstSaves[0].noteId, firstSaves[1].noteId);
+});
+
+test('an interrupted save exposes no partial Markdown file', { timeout: 15000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  const marker = join(fixture.work, 'save-staged');
+  const hook = join(fixture.work, 'pause.mjs');
+  writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const write = fs.writeFileSync;
+fs.writeFileSync = (destination, data, options) => {
+  if (typeof data === 'string' && data.includes('frozencaribou')) {
+    write(destination, data.slice(0, data.length / 2), options);
+    write(${JSON.stringify(marker)}, '');
+    process.kill(process.pid, 'SIGSTOP');
+  }
+  return write(destination, data, options);
+};
+syncBuiltinESMExports();
+`);
+  const writer = await connect(t, { ...fixture, nodeArgs: ['--import', hook] });
+  const args = { projectId: 'alpha', requestId: 'interrupt', title: 'Handoff', body: 'frozencaribou' };
+  writer.sendCall('save_project_note', args);
+  for (let attempt = 0; !existsSync(marker) && attempt < 100; attempt++) await delay(25);
+  assert.ok(existsSync(marker), 'The server did not reach the interrupted write');
+  const reader = await connect(t, fixture);
+  const list = () => reader.call('list_sources', { projectId: 'alpha' });
+  assert.deepEqual((await list()).sources, []);
+  const [, signal] = await writer.stop('SIGKILL');
+  assert.equal(signal, 'SIGKILL');
+  assert.deepEqual((await list()).sources, []);
+  assert.equal(readdirSync(dirname(fixture.registry), { recursive: true }).filter(path => path.endsWith('.md')).length, 0);
+
+  const saved = await reader.call('save_project_note', args);
+  assert.deepEqual((await list()).sources.map(source => source.sourceId), [saved.noteId]);
+  const privateDir = dirname(fixture.registry);
+  const [relativePath] = readdirSync(privateDir, { recursive: true }).filter(path => path.endsWith('.md'));
+  assert.ok(relativePath);
+  const path = join(privateDir, relativePath);
+  let privatePath = path;
+  while (privatePath !== privateDir) {
+    const { mode, uid } = statSync(privatePath);
+    assert.equal(mode & 0o077, 0);
+    assert.equal(uid, process.getuid());
+    privatePath = dirname(privatePath);
+  }
+  assert.match(readFileSync(path, 'utf8'), /\nfrozencaribou$/);
+});
+
+test('saves reject long lines before writing and accept the read limit', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  const client = await connect(t, fixture);
+  const body = 'pondwatch ' + 'é'.repeat((32 * 1024 - 10) / 2);
+  const args = { projectId: 'alpha', requestId: 'line-limit', title: 'Handoff', body };
+  const initialFiles = readdirSync(dirname(fixture.registry));
+  assert.deepEqual(await client.call('save_project_note', { ...args, body: body + 'x' }), { error: 'line_too_long' });
+  assert.deepEqual(await client.call('save_project_note', { ...args, title: body }), { error: 'line_too_long' });
+  assert.deepEqual(readdirSync(dirname(fixture.registry)), initialFiles);
+
+  const { noteId } = await client.call('save_project_note', args);
+  assert.deepEqual(await client.call('save_project_note', { ...args, body: body + 'x' }),
+    { error: 'note_request_conflict' });
+  const first = await client.call('read_source', { projectId: 'alpha', sourceId: noteId });
+  const rest = await client.call('read_source', { projectId: 'alpha', sourceId: noteId, startLine: first.nextStartLine });
+  assert.equal(rest.text, body);
+  for (const mode of ['ranked', 'literal']) {
+    const { hits } = await client.call('search_project', { projectId: 'alpha', query: 'pondwatch', mode });
+    assert.equal(hits[0].sourceId, noteId);
+  }
+});
+
+test('two registries can save the same project ID and request ID independently', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const second = { ...fixture, registry: join(dirname(fixture.registry), 'other.json') };
+  const register = ['register', 'alpha', fixture.checkout, fixture.notes];
+  fixture.cli(...register);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  const secondCli = (...args) => run(second.work, process.execPath, entry, '--registry', second.registry, ...args);
+  secondCli(...register);
+  secondCli('note-saves', 'alpha', 'enable');
+  const [firstClient, secondClient] = await Promise.all([connect(t, fixture), connect(t, second)]);
+  const args = { projectId: 'alpha', requestId: 'shared-id', title: 'Handoff', body: 'Private details' };
+  const [first, other] = await Promise.all([firstClient.call('save_project_note', args),
+    secondClient.call('save_project_note', args)]);
+  assert.notEqual(first.noteId, other.noteId);
+  for (const [client, ownId, foreignId] of [[firstClient, first.noteId, other.noteId],
+    [secondClient, other.noteId, first.noteId]]) {
+    const { sources } = await client.call('list_sources', { projectId: 'alpha' });
+    assert.deepEqual(sources.map(source => source.sourceId), [ownId]);
+    assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId: foreignId }),
+      { error: 'source_unavailable' });
+  }
+});
+
+test('a save can finish when the cold index briefly reports a busy journal', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  const hook = join(fixture.work, 'busy.mjs');
+  writeFileSync(hook, `import { DatabaseSync } from 'node:sqlite';
+const prepare = DatabaseSync.prototype.prepare;
+let busy = true;
+DatabaseSync.prototype.prepare = function (sql) {
+  if (busy && sql === 'PRAGMA journal_mode = WAL') {
+    busy = false;
+    throw Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+  }
+  return prepare.call(this, sql);
+};
+`);
+  const client = await connect(t, { ...fixture, nodeArgs: ['--import', hook] });
+  const result = await client.call('save_project_note',
+    { projectId: 'alpha', requestId: 'cold-index', title: 'Handoff', body: 'Check coldstream.' });
+  assert.ok(result.noteId, JSON.stringify(result));
+  const found = await client.call('search_project', { projectId: 'alpha', query: 'coldstream' });
+  assert.equal(found.hits[0].sourceId, result.noteId);
+});
+
+test('unsafe saved note storage leaves ordinary sources discoverable', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  writeFileSync(join(fixture.checkout, 'ordinary.md'), 'Find sharedmarker in this source.');
+  fixture.cli('refresh', 'alpha');
+  const client = await connect(t, fixture);
+  const { noteId } = await client.call('save_project_note',
+    { projectId: 'alpha', requestId: 'hidden', title: 'Private handoff', body: 'Find sharedmarker in this note.' });
+  assert.ok(noteId);
+  chmodSync(join(dirname(fixture.registry), '.margin-saved-notes'), 0o755);
+
+  const listing = await client.call('list_sources', { projectId: 'alpha' });
+  assert.deepEqual(listing.sources?.map(source => source.relativePath), ['ordinary.md'], JSON.stringify(listing));
+  assert.deepEqual(listing.warnings, [{ rootId: '@saved-notes', error: 'root_unavailable' }]);
+  assert.equal(listing.coverage.complete, false);
+  for (const mode of ['ranked', 'literal']) {
+    const result = await client.call('search_project', { projectId: 'alpha', query: 'sharedmarker', mode });
+    assert.deepEqual(result.hits.map(hit => hit.relativePath), ['ordinary.md']);
+    assert.equal(result.coverage.complete, false);
+    assert.deepEqual(result.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
+      [{ error: 'root_unavailable' }]);
+  }
+  assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId: noteId }),
+    { error: 'note_storage_unavailable' });
+});
+
+test('an inheritable ACL on the registry directory blocks private saves',
+  { timeout: 10000, skip: process.platform !== 'darwin' }, async t => {
+    const fixture = setup(t);
+    fixture.cli('register', 'alpha', fixture.checkout);
+    fixture.cli('note-saves', 'alpha', 'enable');
+    writeFileSync(join(fixture.checkout, 'ordinary.md'), 'Read ordinarymarker.');
+    fixture.cli('refresh', 'alpha');
+    const directory = dirname(fixture.registry);
+    execFileSync('/bin/chmod', ['+a', 'everyone allow read,search,file_inherit,directory_inherit', directory]);
+    execFileSync('/usr/bin/xattr', ['-w', 'com.example.margin-fixture', 'acl-test', directory]);
+    const before = readdirSync(directory);
+    const client = await connect(t, fixture);
+    const response = await client.call('save_project_note',
+      { projectId: 'alpha', requestId: 'unsafe-parent', title: 'Private handoff', body: 'Protect the note.' });
+    assert.deepEqual(response, { error: 'note_storage_unavailable' });
+    assert.deepEqual(readdirSync(directory), before);
+    const listed = await client.call('list_sources', { projectId: 'alpha' });
+    assert.deepEqual(listed.sources.map(source => source.relativePath), ['ordinary.md']);
+    assert.deepEqual(listed.warnings, []);
+    const found = await client.call('search_project', { projectId: 'alpha', query: 'ordinarymarker' });
+    assert.deepEqual(found.hits.map(hit => hit.relativePath), ['ordinary.md']);
+  });
+
+test('saved note text is not added to an index with an ACL',
+  { timeout: 10000, skip: process.platform !== 'darwin' }, async t => {
+    const fixture = setup(t);
+    fixture.cli('register', 'alpha', fixture.checkout);
+    fixture.cli('note-saves', 'alpha', 'enable');
+    fixture.cli('refresh', 'alpha');
+    const directory = dirname(fixture.registry);
+    const [index] = readdirSync(directory).filter(name => name.endsWith('.sqlite'));
+    assert.ok(index);
+    execFileSync('/bin/chmod', ['+a', 'everyone allow read', join(directory, index)]);
+    const before = readFileSync(join(directory, index));
+    const client = await connect(t, fixture);
+    const response = await client.call('save_project_note',
+      { projectId: 'alpha', requestId: 'unsafe-index', title: 'Private handoff', body: 'Protect the note.' });
+    assert.deepEqual(response, { error: 'index_unavailable' });
+    const refresh = spawnSync(process.execPath, [entry, '--registry', fixture.registry, 'refresh', 'alpha'],
+      { cwd: fixture.work, encoding: 'utf8' });
+    assert.equal(refresh.status, 1);
+    assert.match(refresh.stderr, /index_unavailable/);
+    assert.deepEqual(readFileSync(join(directory, index)), before);
+  });

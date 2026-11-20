@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, lstatSync, openSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, type SQLOutputValue } from 'node:sqlite';
 import {
   contentHash as hash, evidenceFormat, extractEvidence, originalImage, readEvidenceBytes, videoFrame,
   type Evidence, type EvidenceItem, type Retrieval
@@ -8,14 +8,17 @@ import {
 import { fetchEvidence, linksId } from './links.ts';
 import { literalPassages, passageAtLines, rankedPassages, textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
-import { canonicalLocation, checkOutsideRoots, MarginError, type Project, type Root } from './registry.ts';
-import { requireListedSource, requireSource, scanPaths, sourceId } from './sources.ts';
+import { canonicalLocation, checkOutsideRoots, hasDarwinAcl, MarginError, type Project, type Root } from './registry.ts';
+import { requireListedSource, requireSource, savedNotesId, scanPaths, sourceId } from './sources.ts';
 
 type IndexRoot = Root | { id: typeof linksId; kind: 'links'; path: ''; urls: string[] };
 
-export function indexRoots(project: Project): IndexRoot[] {
+export function indexRoots(project: Project, savedNotes?: Root): IndexRoot[] {
+  const roots: IndexRoot[] = [...project.roots];
   const urls = project.approvedUrls;
-  return urls?.length ? [...project.roots, { id: linksId, kind: 'links', path: '', urls }] : project.roots;
+  if (urls?.length) roots.push({ id: linksId, kind: 'links', path: '', urls });
+  if (savedNotes) roots.push(savedNotes);
+  return roots;
 }
 
 type Gap = { error: string; relativePath?: string };
@@ -32,14 +35,15 @@ function rootKey(root: IndexRoot) {
   return JSON.stringify([root.id, root.kind, root.path]);
 }
 
-function indexPath(registryPath: string, projectId: string, roots: Root[]) {
+function indexPath(registryPath: string, projectId: string, roots: Root[], privateNotes = false) {
   // fix: Hash IDs to keep case variants separate on case-insensitive filesystems.
   const path = `${canonicalLocation(registryPath)}.${hash(projectId)}.sqlite`;
   for (const candidate of [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]) {
-    checkOutsideRoots(canonicalLocation(candidate), roots, 'index');
+    checkOutsideRoots(candidate, roots, 'index');
     try {
       const stat = lstatSync(candidate);
-      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) {
+      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 ||
+          (privateNotes && (stat.uid !== process.getuid?.() || hasDarwinAcl(candidate)))) {
         throw new MarginError('index_unavailable');
       }
     } catch (error) {
@@ -88,17 +92,34 @@ const schema = `
   END;
 `;
 
+const busyTimeout = 5000;
+const sqliteBusy = 5;
+
+function enableWal(db: DatabaseSync) {
+  const deadline = performance.now() + busyTimeout;
+  const waiter = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try {
+      if (db.prepare('PRAGMA journal_mode = WAL').get()?.journal_mode === 'wal') return;
+      throw new MarginError('index_unavailable');
+    } catch (error) {
+      const { errcode = 0 } = error as { errcode?: number };
+      if ((errcode & 0xff) !== sqliteBusy || performance.now() >= deadline) throw error;
+      // fix: SQLite can skip its busy timeout during a journal mode change.
+      Atomics.wait(waiter, 0, 0, 10);
+    }
+  }
+}
+
 function openIndex(path: string, write: boolean) {
   try {
     if (write) closeSync(openSync(path, constants.O_CREAT | constants.O_NOFOLLOW | constants.O_WRONLY, 0o600));
     else lstatSync(path);
-    const db = new DatabaseSync(path, { readOnly: !write, timeout: 5000, enableForeignKeyConstraints: true });
+    const db = new DatabaseSync(path, { readOnly: !write, timeout: busyTimeout, enableForeignKeyConstraints: true });
     if (write) {
       try {
         // fix: WAL lets read-only clients read the last commit after a writer dies.
-        if (db.prepare('PRAGMA journal_mode = WAL').get()?.journal_mode !== 'wal') {
-          throw new MarginError('index_unavailable');
-        }
+        enableWal(db);
         db.exec('PRAGMA synchronous = FULL');
         db.exec(schema);
       } catch (error) {
@@ -121,10 +142,11 @@ function getRefresh(db: DatabaseSync | undefined, key: string): Refresh {
   return { status: row.status as string, refreshedAt: (row.refreshedAt ?? undefined) as string | undefined, gaps };
 }
 
-export async function refreshProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[]) {
-  const db = openIndex(indexPath(registryPath, projectId, allRoots), true)!;
+export async function refreshProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[],
+  privateNotes = false) {
+  const db = openIndex(indexPath(registryPath, projectId, allRoots, privateNotes), true)!;
   try {
-    const registered = roots.map(root => root.id);
+    const registered = [...roots.map(root => root.id), savedNotesId];
     const placeholders = registered.map(() => '?').join(', ');
     db.prepare(`DELETE FROM sources WHERE rootId NOT IN (${placeholders})`).run(...registered);
     db.prepare(`DELETE FROM refreshes WHERE rootId NOT IN (${placeholders})`).run(...registered);
@@ -173,9 +195,7 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
   const previous = new Map(old.filter(row => row.rootKey === key).map(row => [row.relativePath, row]));
   const gaps: Gap[] = inventory.unreadable.map(relativePath => ({ error: 'source_unavailable', relativePath }));
   const removeSource = db.prepare('DELETE FROM sources WHERE id = ?');
-  const addSource = db.prepare('INSERT INTO sources(rootId, rootKey, relativePath, hash, text) VALUES (?, ?, ?, ?, ?)');
-  const addRange = db.prepare('INSERT INTO ranges(source, startLine, endLine, text) VALUES (?, ?, ?, ?)');
-
+  const publishText = textPublisher(db, root.id, key);
   for (const entry of old) {
     if (entry.rootKey !== key || !retained.has(entry.relativePath as string)) removeSource.run(entry.id);
   }
@@ -204,18 +224,55 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
       continue;
     }
 
-    const lines = textLines(text);
-    const sizes = lines.map(line => Buffer.byteLength(line));
-    if (sizes.some(size => size > maxBytes)) gaps.push({ error: 'line_too_long', relativePath });
-    const digest = hash(text);
-    if (entry?.hash === digest) continue;
-    if (entry) removeSource.run(entry.id);
-    const { lastInsertRowid } = addSource.run(root.id, key, relativePath, digest, text);
-    for (const passage of rankedPassages(lines, sizes)) {
-      addRange.run(lastInsertRowid, passage.startLine, passage.endLine, passage.text);
+    if (publishText(relativePath, text, entry)) {
+      gaps.push({ error: 'line_too_long', relativePath });
     }
   }
   publishStatus(db, key, gaps);
+}
+
+function textPublisher(db: DatabaseSync, rootId: string, key: string) {
+  const removeSource = db.prepare('DELETE FROM sources WHERE id = ?');
+  const addSource = db.prepare('INSERT INTO sources(rootId, rootKey, relativePath, hash, text) VALUES (?, ?, ?, ?, ?)');
+  const addRange = db.prepare('INSERT INTO ranges(source, startLine, endLine, text) VALUES (?, ?, ?, ?)');
+
+  return (relativePath: string, text: string, previous?: Record<string, SQLOutputValue>) => {
+    const lines = textLines(text);
+    const sizes = lines.map(line => Buffer.byteLength(line));
+    const digest = hash(text);
+    if (previous?.hash !== digest) {
+      if (previous) removeSource.run(previous.id);
+      const { lastInsertRowid } = addSource.run(rootId, key, relativePath, digest, text);
+      for (const passage of rankedPassages(lines, sizes)) {
+        addRange.run(lastInsertRowid, passage.startLine, passage.endLine, passage.text);
+      }
+    }
+    return sizes.some(size => size > maxBytes);
+  };
+}
+
+export function indexSavedNote(registryPath: string, projectId: string, allRoots: Root[], root: Root,
+  relativePath: string) {
+  const db = openIndex(indexPath(registryPath, projectId, allRoots, true), true)!;
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    const key = rootKey(root);
+    const previous = db.prepare('SELECT id, hash FROM sources WHERE rootKey = ? AND relativePath = ?')
+      .get(key, relativePath);
+    const text = readText(requireSource(root, relativePath));
+    const gaps = getRefresh(db, key).gaps.filter(gap => gap.relativePath !== relativePath);
+    const publishText = textPublisher(db, root.id, key);
+    if (publishText(relativePath, text, previous)) {
+      gaps.push({ error: 'line_too_long', relativePath });
+    }
+    db.prepare("INSERT OR IGNORE INTO refreshes VALUES (?, ?, '', 'complete', NULL, '[]')").run(key, root.id);
+    publishStatus(db, key, gaps);
+    db.exec('COMMIT');
+  } catch {
+    throw new MarginError('index_unavailable');
+  } finally {
+    db.close();
+  }
 }
 
 async function getLinks(urls: string[]) {
@@ -304,9 +361,10 @@ function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inven
 }
 
 function withIndex<T>(
-  registryPath: string, projectId: string, allRoots: Root[], read: (db: DatabaseSync | undefined) => T
+  registryPath: string, projectId: string, allRoots: Root[], read: (db: DatabaseSync | undefined) => T,
+  privateNotes = false
 ) {
-  const db = openIndex(indexPath(registryPath, projectId, allRoots), false);
+  const db = openIndex(indexPath(registryPath, projectId, allRoots, privateNotes), false);
   try {
     db?.exec('BEGIN');
     return read(db);
@@ -321,7 +379,8 @@ function withIndex<T>(
 export function indexCoverage(registryPath: string, projectId: string, roots: IndexRoot[],
   allRoots: Root[], inventory: Inventory) {
   try {
-    return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory));
+    return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory),
+      roots.some(root => root.id === savedNotesId));
   } catch {
     const coverage = collectCoverage(undefined, roots, inventory);
     for (const root of coverage.roots) root.gaps.push({ error: 'index_unavailable' });
@@ -527,7 +586,7 @@ export function searchProject(registryPath: string, projectId: string, roots: In
       }
     }
     return { hits, coverage };
-  });
+  }, roots.some(root => root.id === savedNotesId));
 }
 
 function verify(root: Root, relativePath: string, expected: string, coverage: Coverage) {

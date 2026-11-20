@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync,
   renameSync, rmSync, writeFileSync
@@ -23,6 +24,7 @@ export function approvedHttpsUrl(value: string) {
 
 const project = z.strictObject({
   name: z.string().min(1).optional(),
+  noteSavesEnabled: z.boolean().optional(),
   approvedUrls: z.array(z.string().refine(value => approvedHttpsUrl(value) === value)).optional(),
   roots: z.array(root).min(1).refine(roots => new Set(roots.map(root => root.id)).size === roots.length)
 });
@@ -51,6 +53,19 @@ function lstatOrMissing(path: string) {
     return lstatSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+export function hasDarwinAcl(path: string) {
+  if (process.platform !== 'darwin') return false;
+  try {
+    const listing = execFileSync('/bin/ls', ['-lde', '-q', path], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
+    });
+    // fix: Extended attributes can hide the ACL marker, but not the ACL entry lines.
+    return listing.trimEnd().includes('\n');
+  } catch {
+    return lstatOrMissing(path) !== undefined;
   }
 }
 
@@ -85,6 +100,13 @@ export function approveUrl(path: string, projectId: string, value: string) {
   writeProject(path, projectId, project => {
     if (!project) throw new MarginError('project_unavailable');
     return { ...project, approvedUrls: [...new Set([...(project.approvedUrls ?? []), url])] };
+  });
+}
+
+export function setNoteSaves(path: string, projectId: string, enabled: boolean) {
+  writeProject(path, projectId, project => {
+    if (!project) throw new MarginError('project_unavailable');
+    return { ...project, noteSavesEnabled: enabled };
   });
 }
 
