@@ -25,11 +25,11 @@ Set the package version to one the owner has published. The commands below use `
 margin_package='@jccrosby/margin@0.1.0'
 margin_registry="$HOME/Library/Application Support/Margin/projects.json"
 
-pnpm dlx "$margin_package" --registry "$margin_registry" \
+pnpm dlx -- "$margin_package" --registry "$margin_registry" \
   register demo /absolute/path/to/checkout /absolute/path/to/notes
 ```
 
-For npm, use `npx --yes "$margin_package"` in place of `pnpm dlx "$margin_package"`. The remaining arguments are the same.
+For npm, use `npx --yes "$margin_package"` in place of `pnpm dlx -- "$margin_package"`. The remaining arguments are the same.
 
 Margin creates a private registry outside your source roots. Use a distinct project ID for each worktree.
 
@@ -42,7 +42,7 @@ Source IDs stay the same for files at the same relative path.
 To add another Git checkout to the same project, use `add-checkout` with a distinct root ID.
 
 ```sh
-pnpm dlx "$margin_package" --registry "$margin_registry" \
+pnpm dlx -- "$margin_package" --registry "$margin_registry" \
   add-checkout demo extra /absolute/path/to/second-checkout
 ```
 
@@ -53,7 +53,7 @@ Use the same root ID to move that checkout.
 Run a manual refresh after you register a project or change its files.
 
 ```sh
-pnpm dlx "$margin_package" --registry "$margin_registry" refresh demo
+pnpm dlx -- "$margin_package" --registry "$margin_registry" refresh demo
 ```
 
 Margin keeps a private SQLite index per project next to the registry. The CLI publishes each root in one transaction.
@@ -79,7 +79,7 @@ PDF extraction reads the text layer. Video search uses the first embedded timed 
 Approve each HTTPS URL before running refresh. Margin saves approvals in the private registry.
 
 ```sh
-pnpm dlx "$margin_package" --registry "$margin_registry" \
+pnpm dlx -- "$margin_package" --registry "$margin_registry" \
   approve-url demo 'https://example.com/requirements'
 ```
 
@@ -92,7 +92,7 @@ Refresh saves searchable text from HTML, PDF, plain text, Markdown, and JSON res
 Choose one launcher and add the server from any directory. Keep the exact package version in your MCP config. To upgrade, change it to the new published version.
 
 ```sh
-codex mcp add margin -- pnpm dlx "$margin_package" --registry "$margin_registry" serve
+codex mcp add margin -- pnpm dlx -- "$margin_package" --registry "$margin_registry" serve
 ```
 
 With npm, run this command instead.
@@ -147,9 +147,16 @@ Margin skips symlinks, dependency and build directories, and common credential f
 
 ## Verify
 
-Run `npm ci`, `npm test`, and `npm run typecheck` in the Margin checkout. The tests launch the stdio server in a separate directory and use synthetic Git and notes fixtures.
+Use pnpm 12.18.0 to work on Margin. Run these commands from the checkout.
 
-After `npm ci`, you can run `node src/margin.ts` from the checkout with the same arguments.
+```sh
+pnpm install --frozen-lockfile
+pnpm test
+pnpm run typecheck
+```
+
+The tests launch the stdio server in a separate directory with synthetic Git and notes fixtures.
+After installing, you can run `node src/margin.ts` from the checkout with the same arguments.
 
 The Step 1 check used a fresh Codex CLI 0.167.0 session. Codex read bounded passages from both roots and rejected path escapes and foreign source IDs.
 

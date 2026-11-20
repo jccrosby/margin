@@ -5,7 +5,7 @@ version=${1:-}
 mode=${2:-reader}
 if [[ $# -gt 2 || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ||
       ( "$mode" != reader && "$mode" != anonymous && "$mode" != ungranted ) ]]; then
-  echo 'Usage: npm run release:verify -- <version> [reader|anonymous|ungranted]' >&2
+  echo 'Usage: pnpm run release:verify <version> [reader|anonymous|ungranted]' >&2
   exit 2
 fi
 
@@ -19,7 +19,7 @@ if [[ "$mode" == reader ]]; then
   registry="$PWD/projects.json"
   git init --quiet demo
   printf 'Synthetic release check\n' > demo/README.md
-  XDG_CACHE_HOME="$PWD/pnpm-cache" pnpm dlx --store-dir="$PWD/pnpm-store" "$package" \
+  XDG_CACHE_HOME="$PWD/pnpm-cache" pnpm dlx --store-dir="$PWD/pnpm-store" -- "$package" \
     --registry "$registry" register smoke "$PWD/demo"
   npm_config_cache="$PWD/npm-cache" npx --yes "$package" --registry "$registry" refresh smoke
   printf 'Use this registry for the fresh Codex check: %s\n' "$registry"

@@ -1,6 +1,7 @@
 {
   "name": "@jccrosby/margin",
   "version": "0.1.0",
+  "packageManager": "pnpm@12.18.0",
   "type": "module",
   "bin": {"margin": "dist/margin.js"},
   "files": ["dist/*.js"],
@@ -11,7 +12,7 @@
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "prepack": "npm run build",
+    "prepack": "pnpm run build",
     "release:bootstrap": "bash scripts/bootstrap-release.sh",
     "release:verify": "bash scripts/verify-release.sh",
     "test": "node --test",
