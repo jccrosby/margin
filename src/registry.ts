@@ -23,6 +23,7 @@ export function approvedHttpsUrl(value: string) {
 
 const project = z.strictObject({
   name: z.string().min(1).optional(),
+  noteSavesEnabled: z.boolean().optional(),
   approvedUrls: z.array(z.string().refine(value => approvedHttpsUrl(value) === value)).optional(),
   roots: z.array(root).min(1).refine(roots => new Set(roots.map(root => root.id)).size === roots.length)
 });
@@ -85,6 +86,13 @@ export function approveUrl(path: string, projectId: string, value: string) {
   writeProject(path, projectId, project => {
     if (!project) throw new MarginError('project_unavailable');
     return { ...project, approvedUrls: [...new Set([...(project.approvedUrls ?? []), url])] };
+  });
+}
+
+export function setNoteSaves(path: string, projectId: string, enabled: boolean) {
+  writeProject(path, projectId, project => {
+    if (!project) throw new MarginError('project_unavailable');
+    return { ...project, noteSavesEnabled: enabled };
   });
 }
 

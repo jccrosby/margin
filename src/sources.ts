@@ -1,10 +1,14 @@
 import { lstatSync, readdirSync, realpathSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { extname, join, sep } from 'node:path';
 import { evidenceFormat } from './evidence.ts';
 import { git, requireGitCheckout } from './git.ts';
 import { MarginError, type Root } from './registry.ts';
 
+export const savedNotesDirectory = '.margin-saved-notes';
+export const savedNotesId = '@saved-notes';
+
 const excluded = new Set([
+  savedNotesDirectory,
   '.git', 'node_modules', 'dist', 'build', 'coverage', '.aws',
   '.env', '.npmrc', '.netrc', 'id_dsa', 'id_ecdsa', 'id_ecdsa_sk', 'id_ed25519', 'id_ed25519_sk',
   'id_rsa', 'identity'
@@ -72,7 +76,8 @@ function* notePaths(root: Root): Generator<string> {
 
 export function requireRoot(root: Root) {
   try {
-    if (realpathSync.native(root.path) !== root.path || !lstatSync(root.path).isDirectory()) {
+    if (realpathSync.native(root.path) !== root.path || !lstatSync(root.path).isDirectory() ||
+        (root.id !== savedNotesId && root.path.toLowerCase().split(sep).includes(savedNotesDirectory))) {
       throw new Error('Root must be a canonical directory.');
     }
     if (root.kind === 'git') requireGitCheckout(root.path);
@@ -90,7 +95,11 @@ function regularFile(root: Root, relativePath: string) {
       if (!lstatSync(path).isDirectory()) return undefined;
     }
     path = join(root.path, relativePath);
-    if (!lstatSync(path).isFile()) return undefined;
+    const stat = lstatSync(path);
+    if (!stat.isFile()) return undefined;
+    if (root.id === savedNotesId && (stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0)) {
+      throw new MarginError('source_unavailable');
+    }
     if (root.kind === 'context' && realpathSync.native(path) !== path) return undefined;
     return path;
   } catch (error) {
