@@ -4,8 +4,9 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -1082,6 +1083,58 @@ DatabaseSync.prototype.prepare = function (sql) {
   assert.equal(found.hits[0].sourceId, result.noteId);
 });
 
+test('a matching save retry restores search for a committed note', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  writeFileSync(join(fixture.checkout, 'ordinary.md'), 'Read creekwatch.');
+  fixture.cli('refresh', 'alpha');
+  const directory = dirname(fixture.registry);
+  const index = readdirSync(directory).find(name => name.endsWith('.sqlite'));
+  assert.ok(index);
+  const db = new DatabaseSync(join(directory, index));
+  t.after(() => db.close());
+  db.exec(`CREATE TRIGGER fail_indexing BEFORE INSERT ON ranges BEGIN
+    SELECT RAISE(ABORT, 'Fixture indexing failure');
+  END`);
+
+  const writer = await connect(t, fixture);
+  const args = { projectId: 'alpha', requestId: 'pending', title: 'Handoff', body: 'Check creekwatch.' };
+  const pending = await writer.callResult('save_project_note', args);
+  assert.equal(pending.isError, false);
+  const { status, noteId } = pending.structuredContent;
+  assert.equal(status, 'saved_search_pending');
+  assert.ok(noteId);
+  await writer.stop();
+
+  const reader = await connect(t, fixture);
+  const { sources } = await reader.call('list_sources', { projectId: 'alpha' });
+  const saved = sources.find(source => source.rootId === '@saved-notes');
+  assert.equal(saved.sourceId, noteId);
+  const { text } = await reader.call('read_source', { projectId: 'alpha', sourceId: noteId });
+  assert.ok(text.endsWith(args.body));
+  const { createdAt } = JSON.parse(text.split('\n')[1]);
+  assert.equal(createdAt, new Date(createdAt).toISOString());
+  const search = mode => reader.call('search_project', { projectId: 'alpha', query: 'creekwatch', mode });
+  for (const mode of ['literal', 'ranked']) {
+    const result = await search(mode);
+    assert.deepEqual(result.hits.map(hit => hit.relativePath), ['ordinary.md']);
+    assert.equal(result.coverage.complete, false);
+    assert.deepEqual(result.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
+      [{ error: 'source_not_indexed', relativePath: saved.relativePath }]);
+  }
+
+  db.exec('DROP TRIGGER fail_indexing');
+  assert.deepEqual(await reader.call('save_project_note', args), { noteId, createdAt });
+  for (const mode of ['literal', 'ranked']) {
+    const result = await search(mode);
+    assert.ok(result.hits.some(hit => hit.sourceId === noteId));
+    assert.equal(result.coverage.complete, true);
+  }
+  assert.deepEqual(readdirSync(directory, { recursive: true }).filter(path => path.endsWith('.md'))
+    .map(path => basename(path)), [saved.relativePath]);
+});
+
 test('unsafe saved note storage leaves ordinary sources discoverable', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   fixture.cli('register', 'alpha', fixture.checkout);
@@ -1132,7 +1185,7 @@ test('an inheritable ACL on the registry directory blocks private saves',
     assert.deepEqual(found.hits.map(hit => hit.relativePath), ['ordinary.md']);
   });
 
-test('saved note text is not added to an index with an ACL',
+test('a saved note stays private and discoverable when its index is unavailable',
   { timeout: 10000, skip: process.platform !== 'darwin' }, async t => {
     const fixture = setup(t);
     fixture.cli('register', 'alpha', fixture.checkout);
@@ -1146,10 +1199,24 @@ test('saved note text is not added to an index with an ACL',
     const client = await connect(t, fixture);
     const response = await client.call('save_project_note',
       { projectId: 'alpha', requestId: 'unsafe-index', title: 'Private handoff', body: 'Protect the note.' });
-    assert.deepEqual(response, { error: 'index_unavailable' });
+    assert.equal(response.status, 'saved_search_pending');
+    assert.ok(response.noteId);
+    const search = await client.call('search_project', { projectId: 'alpha', query: 'Protect' });
+    assert.deepEqual(search.hits, []);
+    assert.equal(search.coverage.complete, false);
+    assert.deepEqual(search.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
+      [{ error: 'index_unavailable' }]);
     const refresh = spawnSync(process.execPath, [entry, '--registry', fixture.registry, 'refresh', 'alpha'],
       { cwd: fixture.work, encoding: 'utf8' });
     assert.equal(refresh.status, 1);
     assert.match(refresh.stderr, /index_unavailable/);
     assert.deepEqual(readFileSync(join(directory, index)), before);
+
+    renameSync(join(directory, index), join(directory, 'unavailable.sqlite.bak'));
+    const missing = await client.call('search_project', { projectId: 'alpha', query: 'Protect' });
+    const { sources } = await client.call('list_sources', { projectId: 'alpha' });
+    const saved = sources.find(source => source.sourceId === response.noteId);
+    assert.equal(missing.coverage.complete, false);
+    assert.deepEqual(missing.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
+      [{ error: 'source_not_indexed', relativePath: saved.relativePath }]);
   });

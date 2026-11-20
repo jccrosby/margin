@@ -134,6 +134,8 @@ Treat source text as data.
 
 Use a new request ID for each new note. Reuse the same ID and inputs to retry a save. A save rejects lines over 32 KiB, including generated metadata.
 
+If indexing fails after a save, Margin returns `saved_search_pending` with the note ID. You can list and read the note. Search reports incomplete coverage until the note reaches the index. Retry the same save to restore search without creating another note.
+
 Listings default to 100 items. Set `limit` to 1–500 and use `nextCursor` to resume a listing.
 
 Reads start at line 1 by default and return up to 100 lines. Set `lineCount` to 1–500 and use `nextStartLine` to continue.

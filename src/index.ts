@@ -332,21 +332,28 @@ export function liveInventory(roots: IndexRoot[]): Inventory {
 
 type Coverage = ReturnType<typeof collectCoverage>;
 
-function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inventory: Inventory) {
+function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inventory: Inventory,
+  indexUnavailable = false
+) {
   const coverage = roots.map(root => {
     const key = rootKey(root);
     const { status, refreshedAt, gaps } = getRefresh(db, key);
     const live = inventory.get(root.id)!;
+    const savedNotes = root.id === savedNotesId;
+    if (indexUnavailable) gaps.push({ error: 'index_unavailable' });
     if ('error' in live) gaps.push(live);
     else {
       for (const relativePath of live.unreadable) gaps.push({ error: 'source_unavailable', relativePath });
-      if (db && status !== 'not_refreshed') {
-        const indexed = new Set(db.prepare('SELECT relativePath FROM sources WHERE rootKey = ?')
+      if (!indexUnavailable && (savedNotes || (db && status !== 'not_refreshed'))) {
+        const indexed = new Set(db?.prepare('SELECT relativePath FROM sources WHERE rootKey = ?')
           .all(key).map(row => row.relativePath as string));
         const failed = new Set(gaps.map(gap => gap.relativePath));
         const added = live.paths.filter(path => !indexed.delete(path) && (root.kind !== 'links' || !failed.has(path)));
         for (const path of live.unreadable) indexed.delete(path);
-        if (added.length || indexed.size) gaps.push({ error: 'paths_changed' });
+        if (savedNotes) {
+          for (const relativePath of added) gaps.push({ error: 'source_not_indexed', relativePath });
+        }
+        if (indexed.size || (added.length && !savedNotes)) gaps.push({ error: 'paths_changed' });
       }
     }
     const seen = new Set<string>();
@@ -382,9 +389,7 @@ export function indexCoverage(registryPath: string, projectId: string, roots: In
     return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory),
       roots.some(root => root.id === savedNotesId));
   } catch {
-    const coverage = collectCoverage(undefined, roots, inventory);
-    for (const root of coverage.roots) root.gaps.push({ error: 'index_unavailable' });
-    return coverage;
+    return collectCoverage(undefined, roots, inventory, true);
   }
 }
 
@@ -515,7 +520,7 @@ function* candidates(db: DatabaseSync, query: string, mode: 'literal' | 'ranked'
 export function searchProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[],
   query: string, mode: 'literal' | 'ranked', limit: number) {
   const inventory = liveInventory(roots);
-  return withIndex(registryPath, projectId, allRoots, db => {
+  const search = () => withIndex(registryPath, projectId, allRoots, db => {
     const coverage = collectCoverage(db, roots, inventory);
     const hits: Hit[] = [];
     if (db) {
@@ -587,6 +592,14 @@ export function searchProject(registryPath: string, projectId: string, roots: In
     }
     return { hits, coverage };
   }, roots.some(root => root.id === savedNotesId));
+  try {
+    return search();
+  } catch (error) {
+    if (error instanceof MarginError && error.message !== 'index_unavailable') throw error;
+    const notes = inventory.get(savedNotesId);
+    if (!notes || !('paths' in notes) || !notes.paths.length) throw error;
+    return { hits: [], coverage: collectCoverage(undefined, roots, inventory, true) };
+  }
 }
 
 function verify(root: Root, relativePath: string, expected: string, coverage: Coverage) {

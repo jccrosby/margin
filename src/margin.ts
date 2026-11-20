@@ -181,7 +181,11 @@ async function serve(registryPath: string) {
     const { project, allRoots } = getProject(registryPath, args.projectId);
     if (!project.noteSavesEnabled) throw new MarginError('note_saves_disabled');
     const { root, relativePath, noteId, createdAt } = commitNote(registryPath, allRoots, args);
-    indexSavedNote(registryPath, args.projectId, allRoots, root, relativePath);
+    try {
+      indexSavedNote(registryPath, args.projectId, allRoots, root, relativePath);
+    } catch {
+      return { status: 'saved_search_pending', noteId };
+    }
     return { noteId, createdAt };
   }, { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 
