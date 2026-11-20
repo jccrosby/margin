@@ -36,7 +36,7 @@ In GitHub package settings, confirm **Private** visibility and grant readers dir
 ## Verify before sharing
 
 1. Confirm the exact version, **Private** visibility, and grants on GitHub.
-2. On macOS with Node.js 26, Git, pnpm, and npm, use an account with direct **Read** access. Follow the [reader setup](README.md#install-and-register-a-project), then run the command below with the published version.
+2. On macOS with Node.js 26, Git, pnpm, and npm, use an account with direct **Read** access. Follow the [reader setup](README.md#get-access-to-margin), then run the command below with the published version.
 
    ```sh
    pnpm run release:verify 0.1.0
