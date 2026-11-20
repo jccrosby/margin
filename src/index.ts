@@ -3,7 +3,7 @@ import { closeSync, constants, lstatSync, openSync } from 'node:fs';
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite';
 import {
   contentHash as hash, evidenceFormat, extractEvidence, originalImage, readEvidenceBytes, videoFrame,
-  type Evidence, type EvidenceItem, type Retrieval
+  type Evidence, type EvidenceItem, type LineLocation, type Retrieval
 } from './evidence.ts';
 import { fetchEvidence, linksId } from './links.ts';
 import { literalPassages, passageAtLines, rankedPassages, textLines } from './passages.ts';
@@ -403,6 +403,16 @@ function storedEvidence(db: DatabaseSync | undefined, rootId: string, key: strin
   }
 }
 
+export function readTextPassage(root: Root, relativePath: string, requestedHash: string, location: LineLocation) {
+  if (evidenceFormat(relativePath)) throw new MarginError('evidence_unavailable');
+  const sourceText = readText(requireSource(root, relativePath), bytes => {
+    if (hash(bytes) !== requestedHash) throw new MarginError('stale_citation');
+  });
+  const text = passageAtLines(sourceText, location.startLine, location.endLine);
+  if (text === undefined) throw new MarginError('evidence_unavailable');
+  return text;
+}
+
 export function openEvidence(registryPath: string, projectId: string, root: IndexRoot, allRoots: Root[],
   relativePath: string, requestedHash: string | undefined, location: EvidenceItem['location'] | undefined,
   atSeconds: number | undefined) {
@@ -428,7 +438,12 @@ export function openEvidence(registryPath: string, projectId: string, root: Inde
     return { data: { ...source, contentHash, ...evidence.retrieval, failures: evidence.errors,
       ...(item ?? { kind: 'link', location: {} }) } };
   }
-  if (!format) throw new MarginError('evidence_unavailable');
+  if (!format) {
+    if (!requestedHash || !location || !('startLine' in location)) throw new MarginError('evidence_unavailable');
+    const { startLine, endLine } = location;
+    const text = readTextPassage(root, relativePath, requestedHash, { startLine, endLine });
+    return { data: { ...source, contentHash: requestedHash, kind: 'extracted_text', location, text, failures: [] } };
+  }
   if (atSeconds !== undefined && format !== 'video') throw new MarginError('invalid_argument');
   const bytes = readEvidenceBytes(requireSource(root, relativePath));
   const contentHash = hash(bytes);
@@ -586,7 +601,8 @@ export function searchProject(registryPath: string, projectId: string, roots: In
           if (hits.length === limit) break;
           continue;
         }
-        hits.push({ sourceId: sourceId(projectId, rootId, relativePath), ...candidate });
+        const source = { sourceId: sourceId(projectId, rootId, relativePath), ...candidate };
+        hits.push(candidate.matchedOn === 'text' ? { ...source, contentHash: expected } : source);
         if (hits.length === limit) break;
       }
     }

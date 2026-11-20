@@ -870,6 +870,78 @@ test('a project must opt in to save notes, including on retry', { timeout: 10000
   assert.deepEqual(await save(), saved);
 });
 
+test('saved Markdown and code citations reopen in a fresh session and remain in the note after edits',
+  { timeout: 10000 }, async t => {
+    const fixture = setup(t);
+    const paths = [join(fixture.notes, 'rollout.md'), join(fixture.checkout, 'player.ts')];
+    const passages = ['# Airship rollout\n', 'export const airship = true;\r\n'];
+    paths.forEach((path, index) => writeFileSync(path, passages[index]));
+    const projectId = 'alpha';
+    fixture.cli('register', projectId, fixture.checkout, fixture.notes);
+    fixture.cli('note-saves', projectId, 'enable');
+    fixture.cli('refresh', projectId);
+
+    const writer = await connect(t, fixture);
+    const search = await writer.call('search_project', { projectId, query: 'airship' });
+    const hits = paths.map(path => search.hits.find(hit => hit.relativePath === basename(path)));
+    const citations = hits.map(({ sourceId, contentHash, startLine, endLine }) =>
+      ({ sourceId, contentHash, location: { startLine, endLine } }));
+    const args = { projectId, requestId: 'cited-handoff', title: 'Handoff', body: 'Check the rollout.', citations };
+    const saved = await writer.call('save_project_note', args);
+    assert.ok(saved.noteId, JSON.stringify(saved));
+    await writer.stop();
+
+    const reader = await connect(t, fixture);
+    const reopen = citation => reader.call('open_evidence', { projectId, ...citation });
+    const read = () => reader.call('read_source', { projectId, sourceId: saved.noteId });
+    const before = await read();
+    const { citations: savedCitations } = JSON.parse(before.text.split('\n')[1]);
+    assert.deepEqual(savedCitations, citations);
+    assert.match(before.text, /# Handoff\n\nCheck the rollout\.$/);
+    for (const [index, citation] of savedCitations.entries()) {
+      assert.ok(!before.text.includes(passages[index]));
+      const opened = await reopen(citation);
+      assert.equal(opened.text, passages[index]);
+      assert.deepEqual(opened.location, citation.location);
+      assert.equal(opened.contentHash, citation.contentHash);
+
+      writeFileSync(paths[index], index === 0 ? 'Changed after the save.\n' : Buffer.from([0xff]));
+      assert.deepEqual(await reopen(citation), { error: 'stale_citation' });
+    }
+    assert.deepEqual(await read(), before);
+    assert.deepEqual(await reader.call('save_project_note', args), saved);
+    assert.deepEqual(await reader.call('save_project_note', { ...args, citations: citations.slice(1) }),
+      { error: 'note_request_conflict' });
+  });
+
+test('a new save rejects cross-project, out-of-range, and unsupported citations', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  writeFileSync(join(fixture.notes, 'rollout.md'), '# Airship rollout\n');
+  writeFileSync(join(fixture.notes, 'status.txt'), 'Check the checklist.\n');
+  fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
+  fixture.cli('register', 'beta', fixture.checkout, fixture.notes);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  fixture.cli('refresh', 'alpha');
+  const client = await connect(t, fixture);
+  const { hits: [{ sourceId, contentHash, startLine, endLine }] } =
+    await client.call('search_project', { projectId: 'alpha', query: 'Airship', mode: 'literal' });
+  const citation = { sourceId, contentHash, location: { startLine, endLine } };
+  const { sources: [foreign] } = await client.call('list_sources', { projectId: 'beta' });
+  const args = { projectId: 'alpha', requestId: 'invalid-citation', title: 'Handoff', body: 'Check the rollout.' };
+  const save = citation => client.call('save_project_note', { ...args, citations: [citation] });
+  assert.deepEqual(await save({ ...citation, sourceId: foreign.sourceId }), { error: 'source_unavailable' });
+  assert.deepEqual(await save({ ...citation, location: { startLine, endLine: endLine + 1 } }),
+    { error: 'evidence_unavailable' });
+  assert.deepEqual(await save({ ...citation, text: '# Airship rollout\n' }), { error: 'invalid_argument' });
+  const { hits: [plainText] } = await client.call('search_project', { projectId: 'alpha', query: 'checklist' });
+  assert.equal(plainText.relativePath, 'status.txt');
+  const plainCitation = { sourceId: plainText.sourceId, contentHash: plainText.contentHash,
+    location: { startLine: plainText.startLine, endLine: plainText.endLine } };
+  assert.deepEqual(await save(plainCitation), { error: 'evidence_unavailable' });
+  const { sources } = await client.call('list_sources', { projectId: 'alpha' });
+  assert.deepEqual(sources.map(source => source.sourceId), [sourceId, plainText.sourceId]);
+});
+
 test('a fresh server can find a saved note through list, read, and both search modes',
   { timeout: 10000 }, async t => {
     const fixture = setup(t);

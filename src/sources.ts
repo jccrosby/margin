@@ -1,5 +1,5 @@
 import { lstatSync, readdirSync, realpathSync } from 'node:fs';
-import { extname, join, sep } from 'node:path';
+import { basename, extname, join, sep } from 'node:path';
 import { evidenceFormat } from './evidence.ts';
 import { git, requireGitCheckout } from './git.ts';
 import { MarginError, type Root } from './registry.ts';
@@ -13,14 +13,14 @@ const excluded = new Set([
   '.env', '.npmrc', '.netrc', 'id_dsa', 'id_ecdsa', 'id_ecdsa_sk', 'id_ed25519', 'id_ed25519_sk',
   'id_rsa', 'identity'
 ]);
-const textExtensions = new Set([
-  '.c', '.cpp', '.cs', '.css', '.csv', '.go', '.h', '.hpp', '.html', '.java', '.js', '.json',
+const noteCitationExtensions = new Set([
+  '.c', '.cpp', '.cs', '.css', '.go', '.h', '.hpp', '.html', '.java', '.js', '.json',
   '.jsonc', '.jsx', '.kt', '.kts', '.less', '.mjs', '.cjs', '.md', '.markdown', '.mdx', '.mts', '.cts', '.graphql', '.php',
-  '.py', '.rb', '.rs', '.scss', '.sh', '.sql', '.svelte', '.swift', '.toml', '.ts', '.tsx', '.txt',
+  '.py', '.rb', '.rs', '.scss', '.sh', '.sql', '.svelte', '.swift', '.toml', '.ts', '.tsx',
   '.vue', '.xml', '.yaml', '.yml', '.zsh'
 ]);
-const textNames = new Set([
-  '.editorconfig', '.env.example', '.gitattributes', '.gitignore', 'dockerfile', 'license', 'makefile', 'readme'
+const noteCitationNames = new Set([
+  '.editorconfig', '.env.example', '.gitattributes', '.gitignore', 'dockerfile', 'makefile', 'readme'
 ]);
 
 function isExcluded(segment: string) {
@@ -28,12 +28,19 @@ function isExcluded(segment: string) {
   return excluded.has(name) || (name.startsWith('.env.') && name !== '.env.example');
 }
 
+export function isNoteCitationPath(relativePath: string) {
+  const name = basename(relativePath).toLowerCase();
+  return noteCitationNames.has(name) || noteCitationExtensions.has(extname(name));
+}
+
 export function isSourcePath(relativePath: string) {
   const segments = relativePath.split('/');
   if (segments.some(segment => !segment || segment === '.' || segment === '..' ||
       segment.includes('\0') || isExcluded(segment))) return false;
   const name = segments.at(-1)!.toLowerCase();
-  return textNames.has(name) || textExtensions.has(extname(name)) || evidenceFormat(name) !== undefined;
+  const extension = extname(name);
+  return isNoteCitationPath(name) || extension === '.csv' || extension === '.txt' || name === 'license' ||
+    evidenceFormat(name) !== undefined;
 }
 
 export function sourceId(projectId: string, rootId: string, relativePath: string) {
