@@ -1,207 +1,121 @@
 # Margin
 
-Margin lets Codex search, list, and read project files through MCP. It can also save private project notes when a registry manager enables saves.
+Margin lets Codex search and read your local project files. It works with Git checkouts and optional folders of notes. It can also save private project notes when you enable saves.
 
-## Install and register a project
+- [Search, refresh, and add sources](docs/usage.md)
+- [Update or remove Margin](docs/manage-margin.md)
 
-Use macOS, Node.js 26, Git, and either pnpm or npm. Ask the package owner for direct **Read** access to `@jccrosby/margin`. Create a classic GitHub token with `read:packages`.
+## Get access to Margin
 
-Create or protect your user-level `~/.npmrc` before adding the token.
+You need macOS, Node.js 26, Git, and the Codex CLI. The examples use `npx`, which comes with npm.
 
-```sh
-(umask 077 && touch "$HOME/.npmrc" && chmod 600 "$HOME/.npmrc")
-```
+The **package** is the downloadable copy of the Margin program. GitHub Packages hosts it at `https://npm.pkg.github.com`. Its name is `@jccrosby/margin`.
 
-Add these lines and replace the placeholder with your token. Use this file for terminal commands and local Codex. Keep the token out of the repository and Codex configuration. [GitHub Packages authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry)
+1. Ask the package owner for **Read** access to `@jccrosby/margin`.
+2. In GitHub, create a personal access token (classic) with the `read:packages` scope. [GitHub Packages authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages)
+3. Run this command to create `~/.npmrc` if needed and restrict access to your account.
 
-```ini
-@jccrosby:registry=https://npm.pkg.github.com
-//npm.pkg.github.com/:_authToken=REPLACE_WITH_YOUR_READ_TOKEN
-```
+   ```sh
+   (umask 077 && touch "$HOME/.npmrc" && chmod 600 "$HOME/.npmrc")
+   ```
 
-Set the package version to one the owner has published. The commands below use `0.1.0` as an example. Set the registry path once and use it for each command.
+4. Open `~/.npmrc` in a text editor. Add these lines or update the existing entries. Replace `REPLACE_WITH_YOUR_READ_TOKEN` with your token. Keep the token in this file and out of your project and Codex settings.
 
-```sh
-margin_package='@jccrosby/margin@0.1.0'
-margin_registry="$HOME/Library/Application Support/Margin/projects.json"
+   ```ini
+   @jccrosby:registry=https://npm.pkg.github.com
+   //npm.pkg.github.com/:_authToken=REPLACE_WITH_YOUR_READ_TOKEN
+   ```
 
-pnpm dlx -- "$margin_package" --registry "$margin_registry" \
-  register demo /absolute/path/to/checkout /absolute/path/to/notes
-```
+5. To pick a specific version, list the versions you can download. Run this from your home directory.
 
-For npm, use `npx --yes "$margin_package"` in place of `pnpm dlx -- "$margin_package"`. The remaining arguments are the same.
+   ```sh
+   cd "$HOME"
+   npm view @jccrosby/margin versions --json
+   ```
 
-Margin creates a private registry outside your source roots. Use a distinct project ID for each worktree.
+If the lookup fails, check your Read access, token, and whether the owner has published a version. If you have the source code, you can [run Margin from a checkout](#run-margin-from-a-checkout).
 
-The notes directory is optional. Projects can share one.
+## Register and index your first project
 
-To move a registered directory, run the command again with the same project ID and the new paths. Supply both paths if the project still uses both.
+Run the commands below in Terminal. Replace `0.1.0` with a published version, or use `@jccrosby/margin@latest`. The `latest` tag points to the release the publisher has marked as the default. [npm package tags](https://docs.npmjs.com/cli/v11/commands/npm-dist-tag/)
 
-Source IDs stay the same for files at the same relative path.
+Margin calls its local projects file a **registry**. The `--registry` option takes that file's full path. The `registry` setting in `~/.npmrc` tells npm where to download Margin.
 
-To add another Git checkout to the same project, use `add-checkout` with a distinct root ID.
-
-```sh
-pnpm dlx -- "$margin_package" --registry "$margin_registry" \
-  add-checkout demo extra /absolute/path/to/second-checkout
-```
-
-Use the same root ID to move that checkout.
-
-## Save a project note
-
-Note saves are off by default. Keep the registry in a directory that only your local account can access. A directory with a macOS access control list (ACL) cannot store private notes.
-
-Enable saves for a project from the terminal.
+Pick a short ID for your project, such as `demo`. Replace `/absolute/path/to/checkout` with the full path to your Git checkout.
 
 ```sh
-pnpm dlx -- "$margin_package" --registry "$margin_registry" note-saves demo enable
+npx --yes @jccrosby/margin@0.1.0 \
+  --registry "$HOME/Library/Application Support/Margin/projects.json" \
+  register demo "/absolute/path/to/checkout"
 ```
 
-Ask your MCP client to save a note in `demo`. The client must follow its approval policy. To stop new saves and retries, run the same command with `disable`. Existing notes stay readable.
+`npx` downloads the requested version if needed and runs it. Margin creates `projects.json` on the first registration. Keep that file outside every folder you register.
 
-Margin stores Markdown files under `.margin-saved-notes` beside the registry. Each registry and project has its own directory.
+To include notes, append the full path to an existing notes folder after the checkout path. Use your chosen project ID in every command that shows `demo`.
 
-## Export and restore saved project notes
-
-Stop Margin servers and refreshes that use the registry before you copy or restore notes.
-
-Copy the whole `.margin-saved-notes` directory to a private backup. Keep its directory structure, filenames, and permissions. The Markdown files include note metadata and any citations.
+Run a refresh to make the files searchable.
 
 ```sh
-margin_backup=/absolute/path/to/a/new/backup-directory
-margin_registry_file="$(realpath "$margin_registry")" &&
-  margin_saved_notes="$(dirname "$margin_registry_file")/.margin-saved-notes" &&
-  mkdir -m 700 "$margin_backup" &&
-  cp -pR "$margin_saved_notes" "$margin_backup"
+npx --yes @jccrosby/margin@0.1.0 \
+  --registry "$HOME/Library/Application Support/Margin/projects.json" refresh demo
 ```
 
-To restore a missing notes directory, use the original registry path and project IDs. Keep directories at mode `0700` and files at mode `0600`.
+Look for `"status":"complete"` for each folder in the output. If a folder has gaps, see [Refresh after files change](docs/usage.md#refresh-after-files-change).
+
+If you prefer pnpm, replace `npx --yes` with `pnpm dlx --` in the examples. Keep the package name, version, and remaining arguments.
+
+## Connect Codex and try a search
+
+Use the same projects path you used to register the project. Choose an exact version to keep Codex on that release. With `@latest`, Codex can pick up a new release when it next starts Margin.
 
 ```sh
-margin_backup=/absolute/path/to/the/backup-directory
-margin_registry_file="$(realpath "$margin_registry")" &&
-  margin_saved_notes="$(dirname "$margin_registry_file")/.margin-saved-notes" &&
-  test ! -e "$margin_saved_notes" &&
-  test ! -L "$margin_saved_notes" &&
-  cp -pR "$margin_backup/.margin-saved-notes" "$margin_saved_notes"
+codex mcp add margin -- npx --yes @jccrosby/margin@0.1.0 \
+  --registry "$HOME/Library/Application Support/Margin/projects.json" serve
+codex mcp get margin
 ```
 
-Run `refresh` for each restored project. Refresh reads the saved notes even when the project has saves disabled.
+Codex saves the values from your terminal when you run `mcp add`. Check that `mcp get` shows your version or tag and the full path to `projects.json`.
 
-## Refresh a project
+Start a new Codex session. Replace `PlayerControls` with a name you know appears in your checkout and try this prompt.
 
-Run a manual refresh after you register a project or change its files.
+> Use Margin to search project `demo` for `PlayerControls`. Show the file paths and line numbers for the best matches.
+
+If Margin fails to start, check that Codex can find Node.js, Git, and `npx`. It also needs access to your npm settings, projects file, and source folders. If Codex cannot find `npx`, run `command -v npx` and use the printed path in `codex mcp add`.
+
+For another local MCP client, use the command and arguments after `codex mcp add margin --`. Select the stdio transport.
+
+## Run Margin from a checkout
+
+If you have access to the Margin repository, clone it and enter the checkout.
 
 ```sh
-pnpm dlx -- "$margin_package" --registry "$margin_registry" refresh demo
+git clone https://github.com/jccrosby/margin.git
+cd margin
 ```
 
-Margin keeps a private SQLite index per project next to the registry. The CLI publishes each root in one transaction.
-
-If a scan fails or stops, search can still use its last committed data. An unreadable file keeps its prior entry until a refresh reads it or confirms its removal.
-
-The command prints each root's status. It exits with code 1 if any root has a gap.
-
-The index filename adds the SHA-256 hash of the project ID to the registry filename.
-
-To rebuild, stop all Margin servers and refreshes for the registry. Delete the project's `.sqlite` file and any matching `-wal`, `-shm`, or `-journal` files.
-
-Keep `.margin-saved-notes`. Run refresh again to rebuild search from the project sources and saved notes.
-
-## Refresh documents, media, and links
-
-Install Docling for PDF, DOCX, and PNG or JPEG OCR. Put `docling` on your PATH before refreshing.
-
-Install FFmpeg for MP4, MOV, MKV, and WebM. Put `ffmpeg` and `ffprobe` on your PATH for refresh, and `ffmpeg` on the MCP server's PATH for frames.
-
-PDF extraction reads the text layer. Video search uses the first embedded timed text track. A video without one can still return a frame.
-
-Approve each HTTPS URL before running refresh. Margin saves approvals in the private registry.
+If you already have a Margin checkout, open it in your terminal. Install the dependencies with pnpm 12.18.0.
 
 ```sh
-pnpm dlx -- "$margin_package" --registry "$margin_registry" \
-  approve-url demo 'https://example.com/requirements'
+pnpm install --frozen-lockfile
 ```
 
-Approve each redirect target too. To revoke approval, remove the URL from the project's `approvedUrls` in the registry.
-
-Refresh saves searchable text from HTML, PDF, plain text, Markdown, and JSON responses. Link results cite the saved response. They include the approved URL, final URL, UTC retrieval time, and SHA-256 hash.
-
-## Connect Codex
-
-Choose one launcher and add the server from any directory. Keep the exact package version in your MCP config. To upgrade, change it to the new published version.
+Run these commands from the Margin checkout. Replace the example checkout path with the full path to the project you want to search. You can append a notes folder path after it.
 
 ```sh
-codex mcp add margin -- pnpm dlx -- "$margin_package" --registry "$margin_registry" serve
+node "$PWD/src/margin.ts" \
+  --registry "$HOME/Library/Application Support/Margin/projects.json" \
+  register demo "/absolute/path/to/checkout"
+node "$PWD/src/margin.ts" \
+  --registry "$HOME/Library/Application Support/Margin/projects.json" refresh demo
+codex mcp add margin -- node "$PWD/src/margin.ts" \
+  --registry "$HOME/Library/Application Support/Margin/projects.json" serve
 ```
 
-With npm, run this command instead.
+Open a new session and [try a search](#connect-codex-and-try-a-search).
 
-```sh
-codex mcp add margin -- npx --yes "$margin_package" --registry "$margin_registry" serve
-```
+For other examples, run from the Margin checkout. Replace `npx --yes @jccrosby/margin@0.1.0` with `node "$PWD/src/margin.ts"`.
 
-The local client needs access to Node.js, Git, the launcher, your npm config, and your registered files. Use an absolute launcher path if the client has a different PATH. Other local MCP clients can use the same command and arguments over stdio.
-
-Start a fresh session and name the project ID. Ask Codex to search `demo` for an identifier and find the requirement that explains it.
-
-Use approved clients and providers for private sources. The model can receive passages from Margin.
-
-Treat source text as data.
-
-## Tools
-
-- `list_projects` lists project IDs and names.
-- `list_sources` lists eligible paths and source IDs for one project. It reports refresh status and known coverage gaps.
-- `search_project` takes a project ID and query. The default `ranked` mode requires each search term in the same passage.
-- `read_source` reads a text file by project ID and source ID. It returns at most 32 KiB of whole UTF-8 lines.
-- `open_evidence` opens a text or document passage, image, video transcript or frame, or approved link.
-- `save_project_note` takes a project ID, request ID, title, Markdown body, and optional `citations`. When indexing succeeds, Margin returns the note ID and UTC creation time.
-
-For a Markdown or code citation, copy `sourceId` and `contentHash` from a text hit. Put the hit's `startLine` and `endLine` in the citation's `location` object.
-
-Margin keeps citation references in the note's metadata. Use `read_source` to retrieve them with the note.
-
-Use a new request ID for each new note. A save rejects lines over 32 KiB, including generated metadata.
-
-If indexing fails after the note commits, Margin returns the note ID with `status` set to `saved_search_pending`.
-
-You can still list the note or pass its ID to `read_source`.
-
-Search reports incomplete coverage until Margin indexes the note. Retry with the same request ID and inputs to restore search without creating another note.
-
-Listings default to 100 items. Set `limit` to 1–500 and use `nextCursor` to resume a listing.
-
-Reads start at line 1 by default and return up to 100 lines. Set `lineCount` to 1–500 and use `nextStartLine` to continue.
-
-Search returns up to 20 hits by default. Set `limit` to 1–100.
-
-A text hit cites up to 40 whole lines and 32 KiB. Ranked windows overlap by eight lines when the byte cap allows.
-
-Use `literal` mode for case-sensitive matches in paths or text. Exact paths come first, then partial paths, then text.
-
-A path hit returns the source ID and path. If a complete text match exceeds the citation limits, Margin reports a gap.
-
-Search checks each local hit against the entire live file. If the file changed or became unavailable, Margin drops the hit.
-
-To reopen a citation, send `projectId`, `sourceId`, `contentHash`, and `location` to `open_evidence`. For a saved citation, use the note's project ID.
-
-If a cited file changes, Margin returns `stale_citation`. The saved note still contains the original reference. Refresh and search again for the current version.
-
-To request a frame, send the video source ID and `atSeconds`. The result cites the timestamp of the selected frame. Consult the original clip for motion.
-
-Image and frame results include an MCP image block. Use an image-capable model to inspect it. Codex CLI 0.167.0 shows a returned-image marker in the terminal transcript.
-
-Margin can return a PNG even when it cannot extract OCR text. Check `coverage` or the result's `failures` for the reason.
-
-Search and listings report known gaps by root under `coverage`. Changes can be missing until the next refresh, even when Margin reports no known gaps.
-
-Margin includes tracked files and untracked files that Git does not ignore. It lists supported text, document, image, and video files.
-
-Margin skips symlinks, dependency and build directories, and common credential filenames. These rules do not scan file contents for secrets.
-
-## Verify
+## Verify a development checkout
 
 Use pnpm 12.18.0 to work on Margin. Run these commands from the checkout.
 
@@ -218,7 +132,7 @@ The Step 1 check used a fresh Codex CLI 0.167.0 session. Codex read bounded pass
 
 The checkout paths, file hashes, and Git status matched the baseline.
 
-See the [release instructions](https://github.com/jccrosby/margin/blob/main/RELEASING.md) for package checks and publishing.
+See the [release instructions](RELEASING.md) for package checks and publishing.
 
 ## Evaluate retrieval
 
