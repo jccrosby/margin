@@ -60,7 +60,34 @@ pnpm dlx -- "$margin_package" --registry "$margin_registry" note-saves demo enab
 
 Ask your MCP client to save a note in `demo`. The client must follow its approval policy. To stop new saves and retries, run the same command with `disable`. Existing notes stay readable.
 
-Margin stores Markdown files under `.margin-saved-notes` beside the registry. Each registry and project has its own directory. Keep those files when clearing the search index. A normal refresh preserves saved-note results. If you delete the index, a matching save retry can index that note again.
+Margin stores Markdown files under `.margin-saved-notes` beside the registry. Each registry and project has its own directory.
+
+## Export and restore saved project notes
+
+Stop Margin servers and refreshes that use the registry before you copy or restore notes.
+
+Copy the whole `.margin-saved-notes` directory to a private backup. Keep its directory structure, filenames, and permissions. The Markdown files include note metadata and any citations.
+
+```sh
+margin_backup=/absolute/path/to/a/new/backup-directory
+margin_registry_file="$(realpath "$margin_registry")" &&
+  margin_saved_notes="$(dirname "$margin_registry_file")/.margin-saved-notes" &&
+  mkdir -m 700 "$margin_backup" &&
+  cp -pR "$margin_saved_notes" "$margin_backup"
+```
+
+To restore a missing notes directory, use the original registry path and project IDs. Keep directories at mode `0700` and files at mode `0600`.
+
+```sh
+margin_backup=/absolute/path/to/the/backup-directory
+margin_registry_file="$(realpath "$margin_registry")" &&
+  margin_saved_notes="$(dirname "$margin_registry_file")/.margin-saved-notes" &&
+  test ! -e "$margin_saved_notes" &&
+  test ! -L "$margin_saved_notes" &&
+  cp -pR "$margin_backup/.margin-saved-notes" "$margin_saved_notes"
+```
+
+Run `refresh` for each restored project. Refresh reads the saved notes even when the project has saves disabled.
 
 ## Refresh a project
 
@@ -78,9 +105,9 @@ The command prints each root's status. It exits with code 1 if any root has a ga
 
 The index filename adds the SHA-256 hash of the project ID to the registry filename.
 
-To rebuild, stop all Margin servers and refreshes for the registry. Delete the project's `.sqlite` file and its matching `-wal` and `-shm` files if present.
+To rebuild, stop all Margin servers and refreshes for the registry. Delete the project's `.sqlite` file and any matching `-wal`, `-shm`, or `-journal` files.
 
-Run refresh again.
+Keep `.margin-saved-notes`. Run refresh again to rebuild search from the project sources and saved notes.
 
 ## Refresh documents, media, and links
 

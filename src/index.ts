@@ -142,11 +142,13 @@ function getRefresh(db: DatabaseSync | undefined, key: string): Refresh {
   return { status: row.status as string, refreshedAt: (row.refreshedAt ?? undefined) as string | undefined, gaps };
 }
 
-export async function refreshProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[],
-  privateNotes = false) {
+export async function refreshProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[]) {
+  const registered = roots.map(root => root.id);
+  const privateNotes = registered.includes(savedNotesId);
+  // fix: A first save can create the note root after refresh checks for it.
+  if (!privateNotes) registered.push(savedNotesId);
   const db = openIndex(indexPath(registryPath, projectId, allRoots, privateNotes), true)!;
   try {
-    const registered = [...roots.map(root => root.id), savedNotesId];
     const placeholders = registered.map(() => '?').join(', ');
     db.prepare(`DELETE FROM sources WHERE rootId NOT IN (${placeholders})`).run(...registered);
     db.prepare(`DELETE FROM refreshes WHERE rootId NOT IN (${placeholders})`).run(...registered);

@@ -979,6 +979,87 @@ test('a fresh server can find a saved note through list, read, and both search m
     for (const mode of ['ranked', 'literal']) assert.deepEqual((await search('alpha', mode)).hits, []);
   });
 
+test('saved project notes survive export, index rebuild, and restore', { timeout: 15000 }, async t => {
+  const fixture = setup(t);
+  const projectId = 'alpha';
+  fixture.cli('register', projectId, fixture.checkout, fixture.notes);
+  fixture.cli('register', 'beta', fixture.checkout, fixture.notes);
+  fixture.cli('note-saves', projectId, 'enable');
+  writeFileSync(join(fixture.notes, 'rollout.md'), '# Rollout plan\n');
+  fixture.cli('refresh', projectId);
+
+  const writer = await connect(t, fixture);
+  const { hits: [reference] } = await writer.call('search_project', { projectId, query: 'rollout' });
+  const { sourceId, contentHash, startLine, endLine } = reference;
+  const citations = [{ sourceId, contentHash, location: { startLine, endLine } }];
+  const args = {
+    projectId, requestId: 'export-1', title: 'Private handoff', body: 'Check the moonstone playlist.', citations
+  };
+  const { noteId, createdAt } = await writer.call('save_project_note', args);
+  assert.ok(noteId);
+
+  const list = (client, projectId) => client.call('list_sources', { projectId });
+  const read = (client, projectId) => client.call('read_source', { projectId, sourceId: noteId });
+  const search = (client, projectId, mode) => client.call('search_project', { projectId, query: 'moonstone', mode });
+  const modes = ['ranked', 'literal'];
+  const originalSources = (await list(writer, projectId)).sources;
+  const originalNote = await read(writer, projectId);
+  const originalHits = new Map();
+  for (const mode of modes) {
+    const { hits } = await search(writer, projectId, mode);
+    assert.ok(hits.some(hit => hit.sourceId === noteId));
+    originalHits.set(mode, hits);
+  }
+  await writer.stop();
+  fixture.cli('note-saves', projectId, 'disable');
+
+  const registryDirectory = dirname(fixture.registry);
+  const storage = join(registryDirectory, '.margin-saved-notes');
+  const [relativePath] = readdirSync(storage, { recursive: true }).filter(path => path.endsWith('.md'));
+  const originalFile = readFileSync(join(storage, relativePath));
+  assert.deepEqual(JSON.parse(originalFile.toString('utf8').split('\n')[1]), {
+    noteId, projectId, createdAt, requestId: args.requestId, title: args.title, citations
+  });
+  assert.match(originalNote.text, /# Private handoff\n\nCheck the moonstone playlist\.$/);
+
+  const backup = join(fixture.work, 'backup');
+  mkdirSync(backup, { mode: 0o700 });
+  const exported = join(backup, '.margin-saved-notes');
+  run(fixture.work, 'cp', '-pR', storage, exported);
+  assert.deepEqual(readFileSync(join(exported, relativePath)), originalFile);
+
+  const index = fixture.registry + '.' + createHash('sha256').update(projectId).digest('hex') + '.sqlite';
+  const clearIndex = () => {
+    rmSync(index);
+    for (const suffix of ['-wal', '-shm']) rmSync(index + suffix, { force: true });
+  };
+  const verifyRebuild = async () => {
+    fixture.cli('refresh', projectId);
+    assert.deepEqual(readFileSync(join(storage, relativePath)), originalFile);
+    const reader = await connect(t, fixture);
+    assert.deepEqual((await list(reader, projectId)).sources, originalSources);
+    assert.deepEqual(await read(reader, projectId), originalNote);
+    for (const mode of modes) {
+      const { hits, coverage } = await search(reader, projectId, mode);
+      assert.deepEqual(hits, originalHits.get(mode));
+      assert.equal(coverage.complete, true);
+    }
+    return reader;
+  };
+
+  clearIndex();
+  const rebuilt = await verifyRebuild();
+  await rebuilt.stop();
+  clearIndex();
+  rmSync(storage, { recursive: true });
+  run(fixture.work, 'cp', '-pR', exported, storage);
+  fixture.cli('refresh', 'beta');
+  const restored = await verifyRebuild();
+  assert.deepEqual((await list(restored, 'beta')).sources.map(source => source.relativePath), ['rollout.md']);
+  assert.deepEqual(await read(restored, 'beta'), { error: 'source_unavailable' });
+  for (const mode of modes) assert.deepEqual((await search(restored, 'beta', mode)).hits, []);
+});
+
 test('retries recover a lost save response and concurrent calls never replace notes', { timeout: 15000 }, async t => {
   const fixture = setup(t);
   fixture.cli('register', 'alpha', fixture.checkout);
