@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import {
-  closeSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, rmSync, writeFileSync
+  closeSync, fsyncSync, lstatSync, openSync, rmSync, writeFileSync
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 import { contentHash, lineLocation, versionHash } from './evidence.ts';
 import { textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
-import { canonicalLocation, checkOutsideRoots, hasDarwinAcl, id, MarginError, type Root } from './registry.ts';
-import { requireSource, savedNotesDirectory, savedNotesId, sourceId } from './sources.ts';
+import { checkOutsideRoots, id, MarginError, registryLocation, unsafeStorage, type Root } from './registry.ts';
+import { publishExclusive, requirePrivateAccess, withDirectory } from './macos.ts';
+import { isMissing, requirePrivateDirectory } from './storage.ts';
+import { readLiveSource, savedNotesDirectory, savedNotesId, sourceId } from './sources.ts';
 
 const inputText = z.string().refine(text => text.isWellFormed());
 const noteCitations = z.array(z.strictObject({ sourceId: z.string(), contentHash: versionHash, location: lineLocation }))
@@ -30,43 +32,23 @@ const metadataSchema = z.strictObject({
   citations: noteCitations
 });
 
-function missing(error: unknown) {
-  return (error as NodeJS.ErrnoException).code === 'ENOENT';
-}
-
 export function savedNoteRoot(registryPath: string, projectId: string, allRoots: Root[], create = false): Root | undefined {
+  const registry = registryLocation(registryPath);
+  const parent = dirname(registry);
+  const scope = [savedNotesDirectory, contentHash(basename(registry)), contentHash(projectId)];
+  const location = join(parent, ...scope);
   try {
-    const registry = canonicalLocation(registryPath);
-    const scope = [savedNotesDirectory, contentHash(basename(registry)), contentHash(projectId)];
-    const parent = dirname(registry);
-    if (!create && !lstatSync(join(parent, savedNotesDirectory), { throwIfNoEntry: false })) return undefined;
-    const location = join(parent, ...scope);
     checkOutsideRoots(location, allRoots, 'saved notes directory');
     requirePrivateDirectory(parent);
-    if (hasDarwinAcl(parent)) throw new MarginError('note_storage_unavailable');
     let directory = parent;
     for (const segment of scope) {
       directory = join(directory, segment);
-      if (create) {
-        try {
-          mkdirSync(directory, { mode: 0o700 });
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        }
-      }
-      requirePrivateDirectory(directory);
+      requirePrivateDirectory(directory, create);
     }
     return { id: savedNotesId, kind: 'context', path: location };
   } catch (error) {
-    if (!create && missing(error)) return undefined;
-    throw new MarginError('note_storage_unavailable');
-  }
-}
-
-function requirePrivateDirectory(path: string) {
-  const stat = lstatSync(path);
-  if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) {
-    throw new MarginError('note_storage_unavailable');
+    if (!create && isMissing(error)) return undefined;
+    throw unsafeStorage('note_storage_unavailable', (error as NodeJS.ErrnoException).path ?? location);
   }
 }
 
@@ -76,20 +58,20 @@ function noteMarkdown({ projectId, requestId, title, body, citations }: NoteInpu
 }
 
 function existingNote(root: Root, relativePath: string, args: NoteInput, noteId: string) {
-  const contents = readText(requireSource(root, relativePath));
+  const contents = readLiveSource(root, relativePath, readText);
   let createdAt;
   try {
     const metadata = metadataSchema.parse(JSON.parse(contents.split('\n', 2)[1]));
     createdAt = metadata.createdAt;
   } catch {
-    throw new MarginError('note_storage_unavailable');
+    throw unsafeStorage('note_storage_unavailable', join(root.path, relativePath));
   }
   if (contents !== noteMarkdown(args, noteId, createdAt)) throw new MarginError('note_request_conflict');
   return createdAt;
 }
 
 export function commitNote(registryPath: string, allRoots: Root[], args: NoteInput, validateCitations: () => void) {
-  const registry = canonicalLocation(registryPath);
+  const registry = registryLocation(registryPath);
   const relativePath = `${contentHash(JSON.stringify([registry, args.requestId]))}.md`;
   const noteId = sourceId(args.projectId, savedNotesId, relativePath);
   const reuse = (root: Root) => ({
@@ -110,28 +92,24 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
     const staged = join(root.path, `${randomUUID()}.tmp`);
     const fd = openSync(staged, 'wx', 0o600);
     try {
+      requirePrivateAccess(fd);
       writeFileSync(fd, text);
       fsyncSync(fd);
-      // fix: Publish the complete file atomically without replacing a concurrent save.
+      // Publish without overwriting another save or creating a second hard link.
       try {
-        linkSync(staged, path);
+        publishExclusive(staged, path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         return reuse(root);
       }
-      const directory = openSync(root.path, 'r');
-      try {
-        fsyncSync(directory);
-      } finally {
-        closeSync(directory);
-      }
+      withDirectory(root.path, fsyncSync);
       return { root, relativePath, noteId, createdAt };
     } finally {
       closeSync(fd);
-      rmSync(staged);
+      rmSync(staged, { force: true });
     }
   } catch (error) {
     if (error instanceof MarginError) throw error;
-    throw new MarginError('note_storage_unavailable');
+    throw unsafeStorage('note_storage_unavailable', dirname(registry));
   }
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -1311,11 +1311,12 @@ test('unsafe saved note storage leaves ordinary sources discoverable', { timeout
     assert.deepEqual(result.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
       [{ error: 'root_unavailable' }]);
   }
-  assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId: noteId }),
-    { error: 'note_storage_unavailable' });
+  const unavailable = await client.call('read_source', { projectId: 'alpha', sourceId: noteId });
+  assert.equal(unavailable.error, 'note_storage_unavailable');
+  assert.ok(unavailable.detail.includes(join(dirname(fixture.registry), '.margin-saved-notes')));
 });
 
-test('an inheritable ACL on the registry directory blocks private saves',
+test('an inheritable ACL blocks registry access without changing existing files',
   { timeout: 10000, skip: process.platform !== 'darwin' }, async t => {
     const fixture = setup(t);
     fixture.cli('register', 'alpha', fixture.checkout);
@@ -1329,13 +1330,16 @@ test('an inheritable ACL on the registry directory blocks private saves',
     const client = await connect(t, fixture);
     const response = await client.call('save_project_note',
       { projectId: 'alpha', requestId: 'unsafe-parent', title: 'Private handoff', body: 'Protect the note.' });
-    assert.deepEqual(response, { error: 'note_storage_unavailable' });
+    assert.equal(response.error, 'registry_unavailable');
+    assert.ok(response.detail.includes(directory));
+    assert.match(response.detail, /0700/);
+    assert.equal((await client.call('list_projects')).error, 'registry_unavailable');
+    assert.equal((await client.call('search_project', { projectId: 'alpha', query: 'ordinarymarker' })).error,
+      'registry_unavailable');
+    const refresh = runWithEnv(fixture, process.env, 'refresh', 'alpha');
+    assert.equal(refresh.status, 1);
+    assert.ok(refresh.stderr.includes(directory));
     assert.deepEqual(readdirSync(directory), before);
-    const listed = await client.call('list_sources', { projectId: 'alpha' });
-    assert.deepEqual(listed.sources.map(source => source.relativePath), ['ordinary.md']);
-    assert.deepEqual(listed.warnings, []);
-    const found = await client.call('search_project', { projectId: 'alpha', query: 'ordinarymarker' });
-    assert.deepEqual(found.hits.map(hit => hit.relativePath), ['ordinary.md']);
   });
 
 test('a saved note stays private and discoverable when its index is unavailable',
@@ -1373,3 +1377,126 @@ test('a saved note stays private and discoverable when its index is unavailable'
     assert.deepEqual(missing.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
       [{ error: 'source_not_indexed', relativePath: saved.relativePath }]);
   });
+
+
+test('hard links stop live reads, refresh, search, and citation opens', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const path = join(fixture.checkout, 'entry.md');
+  writeFileSync(path, 'needle before linking\n');
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('refresh', 'alpha');
+  const client = await connect(t, fixture);
+  const { hits: [hit] } = await client.call('search_project', { projectId: 'alpha', query: 'needle' });
+  const { sourceId, contentHash, startLine, endLine } = hit;
+
+  linkSync(path, join(fixture.work, 'alias.md'));
+  const { sources } = await client.call('list_sources', { projectId: 'alpha' });
+  assert.deepEqual(sources, []);
+  assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId }),
+    { error: 'source_unavailable' });
+  assert.deepEqual(await client.call('open_evidence', {
+    projectId: 'alpha', sourceId, contentHash, location: { startLine, endLine }
+  }), { error: 'source_unavailable' });
+  for (const mode of ['ranked', 'literal']) {
+    const search = await client.call('search_project', { projectId: 'alpha', query: 'needle', mode });
+    assert.deepEqual(search.hits, []);
+  }
+  fixture.cli('refresh', 'alpha');
+});
+
+
+test('root aliases preserve Git IDs and matching citations after a root moves', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const alias = join(fixture.work, 'Alias café');
+  const source = 'crème brûlée.md';
+  writeFileSync(join(fixture.checkout, source), 'marker with stable content\n');
+  symlinkSync(fixture.checkout, alias);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('add-checkout', 'alpha', 'extra', alias);
+  fixture.cli('refresh', 'alpha');
+  const client = await connect(t, fixture);
+  const findHit = async mode => {
+    const { hits } = await client.call('search_project', { projectId: 'alpha', query: 'marker', mode });
+    return hits.find(hit => hit.rootId === 'extra');
+  };
+  const hit = await findHit('ranked');
+  assert.equal(hit.relativePath, source);
+  assert.equal((await findHit('literal')).sourceId, hit.sourceId);
+  const { sourceId, contentHash, startLine, endLine } = hit;
+  const citation = { projectId: 'alpha', sourceId, contentHash, location: { startLine, endLine } };
+  const moved = join(fixture.work, 'Checkout déplacé');
+  renameSync(fixture.checkout, moved);
+  rmSync(alias);
+  symlinkSync(moved, alias);
+  assert.deepEqual(await client.call('open_evidence', citation), { error: 'root_unavailable' });
+  fixture.cli('add-checkout', 'alpha', 'extra', alias);
+  assert.equal((await client.call('open_evidence', citation)).text, 'marker with stable content\n');
+  writeFileSync(join(moved, source), 'marker with new content\n');
+  assert.deepEqual(await client.call('open_evidence', citation), { error: 'stale_citation' });
+});
+
+test('a source path replacement during read cannot change the opened file', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  const name = 'entry.md';
+  const original = join(fixture.notes, name);
+  const replacement = join(fixture.work, 'replacement.md');
+  writeFileSync(original, 'verified content\n');
+  writeFileSync(replacement, 'replacement content\n');
+  fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
+  const hook = join(fixture.work, 'swap.mjs');
+  writeFileSync(hook, `import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const read = fs.readSync;
+const inode = fs.statSync(${JSON.stringify(original)}, { bigint: true }).ino;
+let swapped = false;
+fs.readSync = (fd, ...args) => {
+  if (!swapped && fs.fstatSync(fd, { bigint: true }).ino === inode) {
+    swapped = true;
+    fs.renameSync(${JSON.stringify(replacement)}, ${JSON.stringify(original)});
+  }
+  return read(fd, ...args);
+};
+syncBuiltinESMExports();
+`);
+  const client = await connect(t, { ...fixture, nodeArgs: ['--import', hook] });
+  const { sources: [{ sourceId }] } = await client.call('list_sources', { projectId: 'alpha' });
+  const read = () => client.call('read_source', { projectId: 'alpha', sourceId });
+  assert.equal((await read()).text, 'verified content\n');
+  assert.equal((await read()).text, 'replacement content\n');
+});
+
+test('registration checks filesystem type and protects custom storage paths', t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  const before = readFileSync(fixture.registry);
+  const wrongVolume = runWithEnv(fixture, process.env, 'register', 'beta', fixture.checkout, '/dev');
+  assert.equal(wrongVolume.status, 1);
+  assert.match(wrongVolume.stderr, /local APFS directory.*\/dev/);
+  const link = join(fixture.work, 'Linked registry');
+  symlinkSync(dirname(fixture.registry), link);
+  const aliased = { ...fixture, registry: join(link, basename(fixture.registry)) };
+  assert.equal(runWithEnv(aliased, process.env, 'register', 'beta', fixture.checkout).status, 1);
+
+  chmodSync(fixture.work, 0o777);
+  const unsafe = runWithEnv(fixture, process.env, 'register', 'beta', fixture.checkout);
+  assert.equal(unsafe.status, 1);
+  assert.ok(unsafe.stderr.includes(fixture.work));
+  assert.match(unsafe.stderr, /0700/);
+  assert.deepEqual(readFileSync(fixture.registry), before);
+});
+
+test('an ACL on a SQLite sidecar blocks access before SQLite opens it', t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('refresh', 'alpha');
+  const directory = dirname(fixture.registry);
+  const [index] = readdirSync(directory).filter(name => name.endsWith('.sqlite'));
+  const path = join(directory, `${index}-wal`);
+  writeFileSync(path, 'unsafe sidecar fixture', { mode: 0o600 });
+  execFileSync('/bin/chmod', ['+a', 'everyone allow read', path]);
+  const refresh = runWithEnv(fixture, process.env, 'refresh', 'alpha');
+  assert.equal(refresh.status, 1);
+  assert.match(refresh.stderr, /index_unavailable/);
+  assert.ok(refresh.stderr.includes(path));
+  assert.equal(readFileSync(path, 'utf8'), 'unsafe sidecar fixture');
+});

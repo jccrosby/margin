@@ -12,7 +12,7 @@ import { evidenceFormat, evidenceLocation, versionHash, type ImageBlock } from '
 import { linksId } from './links.ts';
 import { commitNote, noteInput, savedNoteRoot } from './notes.ts';
 import { readLines } from './read.ts';
-import { isNoteCitationPath, isSourcePath, requireSource, savedNotesId, sourceId } from './sources.ts';
+import { isNoteCitationPath, isSourcePath, readLiveSource, savedNotesId, sourceId } from './sources.ts';
 import {
   indexCoverage, indexRoots, indexSavedNote, liveInventory, openEvidence, readTextPassage, refreshProject, searchProject
 } from './index.ts';
@@ -92,7 +92,9 @@ async function serve(registryPath: string) {
         const images: ImageBlock[] = [];
         return result(handler(parsed.data, images), images);
       } catch (error) {
-        return result({ error: error instanceof MarginError ? error.message : 'registry_unavailable' });
+        return result(error instanceof MarginError
+          ? { error: error.message, detail: error.detail }
+          : { error: 'registry_unavailable' });
       }
     });
   }
@@ -148,9 +150,10 @@ async function serve(registryPath: string) {
     const { project, allRoots } = getProject(registryPath, projectId);
     const [, rootId, relativePath] = parseSourceId(projectId, sourceId);
     const root = sourceRoot(projectId, project, allRoots, rootId);
-    const path = requireSource(root, relativePath);
-    if (evidenceFormat(relativePath)) throw new MarginError('evidence_required');
-    return { sourceId, rootId, relativePath, ...readLines(path, startLine, lineCount) };
+    return readLiveSource(root, relativePath, fd => {
+      if (evidenceFormat(relativePath)) throw new MarginError('evidence_required');
+      return { sourceId, rootId, relativePath, ...readLines(fd, startLine, lineCount) };
+    });
   });
 
   tool('search_project', 'Search indexed text and verify each citation against the live source.', z.strictObject({
@@ -285,5 +288,6 @@ try {
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'Margin failed.');
+  if (error instanceof MarginError && error.detail) console.error(error.detail);
   process.exitCode = 1;
 }

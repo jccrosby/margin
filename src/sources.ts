@@ -1,7 +1,8 @@
-import { lstatSync, readdirSync, realpathSync } from 'node:fs';
-import { basename, extname, join, sep } from 'node:path';
+import { fstatSync } from 'node:fs';
+import { basename, extname, sep } from 'node:path';
 import { evidenceFormat } from './evidence.ts';
 import { git, requireGitCheckout } from './git.ts';
+import { readEntries, requirePrivateAccess, withDirectory, withEntry } from './macos.ts';
 import { MarginError, type Root } from './registry.ts';
 
 export const savedNotesDirectory = '.margin-saved-notes';
@@ -36,7 +37,7 @@ export function isNoteCitationPath(relativePath: string) {
 export function isSourcePath(relativePath: string) {
   const segments = relativePath.split('/');
   if (segments.some(segment => !segment || segment === '.' || segment === '..' ||
-      segment.includes('\0') || isExcluded(segment))) return false;
+      !segment.isWellFormed() || segment.includes('\0') || isExcluded(segment))) return false;
   const name = segments.at(-1)!.toLowerCase();
   const extension = extname(name);
   return isNoteCitationPath(name) || extension === '.csv' || extension === '.txt' || name === 'license' ||
@@ -47,9 +48,9 @@ export function sourceId(projectId: string, rootId: string, relativePath: string
   return Buffer.from(JSON.stringify([projectId, rootId, relativePath])).toString('base64url');
 }
 
-function gitPaths(root: Root, relativePath?: string) {
+function gitPaths(fd: number, relativePath?: string) {
   const pathspec = relativePath === undefined ? [] : ['--', relativePath];
-  const bytes = git(root.path, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--full-name',
+  const bytes = git(fd, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--full-name',
     ...pathspec);
   const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   const paths = new Set<string>();
@@ -65,90 +66,142 @@ function gitPaths(root: Root, relativePath?: string) {
   return paths;
 }
 
-function* notePaths(root: Root): Generator<string> {
+function* contextPaths(root: Root, fd: number): Generator<string> {
+  const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
   const directories = [''];
   while (directories.length > 0) {
     const parent = directories.pop()!;
-    const directory = join(root.path, parent);
-    if (realpathSync.native(directory) !== directory) continue;
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (!isExcluded(entry.name)) {
-        const path = parent ? `${parent}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) directories.push(path);
-        if (entry.isFile()) yield path;
+    let entries;
+    try {
+      entries = parent ? withEntry(fd, parent, true, directory => {
+        if (root.id === savedNotesId) requirePrivateAccess(directory);
+        return readEntries(directory);
+      }, true) : readEntries(fd);
+    } catch (error) {
+      if (!parent) throw error;
+      continue;
+    }
+    for (const [bytes, kind] of entries) {
+      let name;
+      try {
+        name = decoder.decode(bytes);
+      } catch {
+        continue;
+      }
+      if (!isExcluded(name)) {
+        const path = parent ? `${parent}/${name}` : name;
+        if (kind === 'directory') directories.push(path);
+        else yield path;
       }
     }
   }
 }
 
-export function requireRoot(root: Root) {
+function verifyRootPath(root: Root, fd: number) {
   try {
-    if (realpathSync.native(root.path) !== root.path || !lstatSync(root.path).isDirectory() ||
-        (root.id !== savedNotesId && root.path.toLowerCase().split(sep).includes(savedNotesDirectory))) {
-      throw new Error('Root must be a canonical directory.');
-    }
-    if (root.kind === 'git') requireGitCheckout(root.path);
+    withDirectory(root.path, current => {
+      const original = fstatSync(fd, { bigint: true });
+      const actual = fstatSync(current, { bigint: true });
+      if (original.dev !== actual.dev || original.ino !== actual.ino) throw new Error('The root moved.');
+    });
   } catch {
     throw new MarginError('root_unavailable');
   }
 }
 
-function regularFile(root: Root, relativePath: string) {
+function withRoot<T>(root: Root, use: (fd: number) => T) {
+  let verified = false;
   try {
-    const segments = relativePath.split('/');
-    let path = root.path;
-    for (const directory of segments.slice(0, -1)) {
-      path = join(path, directory);
-      if (!lstatSync(path).isDirectory()) return undefined;
-    }
-    path = join(root.path, relativePath);
-    const stat = lstatSync(path);
-    if (!stat.isFile()) return undefined;
-    if (root.id === savedNotesId && (stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0)) {
-      throw new MarginError('source_unavailable');
-    }
-    if (root.kind === 'context' && realpathSync.native(path) !== path) return undefined;
-    return path;
+    return withDirectory(root.path, fd => {
+      if (root.id === savedNotesId) requirePrivateAccess(fd);
+      else if (root.path.toLowerCase().split(sep).includes(savedNotesDirectory)) {
+        throw new MarginError('root_unavailable');
+      }
+      if (root.kind === 'git') {
+        requireGitCheckout(fd);
+        verifyRootPath(root, fd);
+      }
+      verified = true;
+      return use(fd);
+    });
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw new MarginError('source_unavailable');
+    if (verified) throw error;
+    throw new MarginError('root_unavailable');
   }
+}
+
+function useEntry<T>(root: Root, fd: number, relativePath: string, use: (fd: number) => T) {
+  const privateNote = root.id === savedNotesId;
+  if (privateNote) {
+    for (let end = relativePath.indexOf('/'); end !== -1; end = relativePath.indexOf('/', end + 1)) {
+      withEntry(fd, relativePath.slice(0, end), true, requirePrivateAccess, true);
+    }
+  }
+  return withEntry(fd, relativePath, false, source => {
+    if (privateNote) requirePrivateAccess(source);
+    return use(source);
+  }, root.kind === 'context');
+}
+
+type SourceInventory = { paths: string[]; unreadable: string[] };
+
+export function withInventory<T>(root: Root,
+  use: (inventory: SourceInventory, read: <R>(path: string, use: (fd: number) => R) => R) => T
+) {
+  return withRoot(root, fd => {
+    function scan(): SourceInventory {
+      const paths = root.kind === 'git' ? gitPaths(fd) : contextPaths(root, fd);
+      const eligible: string[] = [];
+      const unreadable: string[] = [];
+      for (const path of paths) {
+        if (!isSourcePath(path)) continue;
+        try {
+          useEntry(root, fd, path, () => eligible.push(path));
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (root.id === savedNotesId || code === 'EACCES' || code === 'EPERM') unreadable.push(path);
+        }
+      }
+      verifyRootPath(root, fd);
+      return { paths: eligible, unreadable };
+    }
+    let inventory;
+    try {
+      inventory = scan();
+    } catch (error) {
+      if (error instanceof MarginError) throw error;
+      throw new MarginError('root_scan_failed');
+    }
+    return use(inventory, (path, read) => readSource(root, fd, path, read));
+  });
 }
 
 export function scanPaths(root: Root) {
-  requireRoot(root);
+  return withInventory(root, inventory => inventory);
+}
+
+function readSource<T>(root: Root, fd: number, path: string, read: (fd: number) => T) {
   try {
-    const paths = root.kind === 'git' ? gitPaths(root) : notePaths(root);
-    const eligible: string[] = [];
-    const unreadable: string[] = [];
-    for (const path of paths) {
-      if (!isSourcePath(path)) continue;
+    return useEntry(root, fd, path, read);
+  } catch (error) {
+    if (error instanceof MarginError) throw error;
+    throw new MarginError('source_unavailable');
+  }
+}
+
+export function readLiveSource<T>(root: Root, relativePath: string, use: (fd: number) => T) {
+  return withRoot(root, fd => {
+    if (!isSourcePath(relativePath)) throw new MarginError('source_unavailable');
+    if (root.kind === 'git') {
+      let listed;
       try {
-        if (regularFile(root, path)) eligible.push(path);
+        listed = gitPaths(fd, relativePath).has(relativePath);
+        verifyRootPath(root, fd);
       } catch {
-        unreadable.push(path);
+        throw new MarginError('root_unavailable');
       }
+      if (!listed) throw new MarginError('source_unavailable');
     }
-    return { paths: eligible, unreadable };
-  } catch {
-    requireRoot(root);
-    throw new MarginError('root_scan_failed');
-  }
-}
-
-export function requireListedSource(root: Root, relativePath: string) {
-  const path = isSourcePath(relativePath) && regularFile(root, relativePath);
-  if (!path) throw new MarginError('source_unavailable');
-  return path;
-}
-
-export function requireSource(root: Root, relativePath: string) {
-  requireRoot(root);
-  const path = requireListedSource(root, relativePath);
-  try {
-    if (root.kind === 'context' || gitPaths(root, relativePath).has(relativePath)) return path;
-  } catch {
-    throw new MarginError('root_unavailable');
-  }
-  throw new MarginError('source_unavailable');
+    return readSource(root, fd, relativePath, use);
+  });
 }
