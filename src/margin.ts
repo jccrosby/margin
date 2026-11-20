@@ -273,8 +273,8 @@ try {
   } else if (command === 'refresh' && args.length === 1) {
     const [projectId] = args;
     const { project, allRoots } = getProject(registryPath, id.parse(projectId));
-    const privateNotes = savedNoteRoot(registryPath, projectId, allRoots) !== undefined;
-    const roots = await refreshProject(registryPath, projectId, indexRoots(project), allRoots, privateNotes);
+    const savedNotes = savedNoteRoot(registryPath, projectId, allRoots);
+    const roots = await refreshProject(registryPath, projectId, indexRoots(project, savedNotes), allRoots);
     console.log(JSON.stringify({ projectId, roots }));
     if (roots.some(root => root.status !== 'complete')) process.exitCode = 1;
   } else if (command === 'serve' && args.length === 0) {
