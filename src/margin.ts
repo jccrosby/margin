@@ -12,7 +12,7 @@ import { evidenceFormat, evidenceLocation, versionHash, type ImageBlock } from '
 import { linksId } from './links.ts';
 import { commitNote, noteInput, savedNoteRoot } from './notes.ts';
 import { readLines } from './read.ts';
-import { isSourcePath, requireSource, savedNotesId, sourceId } from './sources.ts';
+import { isNoteCitationPath, isSourcePath, requireSource, savedNotesId, sourceId } from './sources.ts';
 import {
   indexCoverage, indexRoots, indexSavedNote, liveInventory, openEvidence, readTextPassage, refreshProject, searchProject
 } from './index.ts';
@@ -191,6 +191,7 @@ async function serve(registryPath: string) {
       for (const { sourceId, contentHash, location } of args.citations ?? []) {
         const [, rootId, relativePath] = parseSourceId(args.projectId, sourceId);
         const root = sourceRoot(args.projectId, project, allRoots, rootId);
+        if (!isNoteCitationPath(relativePath)) throw new MarginError('evidence_unavailable');
         readTextPassage(root, relativePath, contentHash, location);
       }
     });

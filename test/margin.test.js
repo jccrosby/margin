@@ -914,9 +914,10 @@ test('saved Markdown and code citations reopen in a fresh session and remain in 
       { error: 'note_request_conflict' });
   });
 
-test('a new save rejects citations outside its project or passage bounds', { timeout: 10000 }, async t => {
+test('a new save rejects cross-project, out-of-range, and unsupported citations', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   writeFileSync(join(fixture.notes, 'rollout.md'), '# Airship rollout\n');
+  writeFileSync(join(fixture.notes, 'status.txt'), 'Check the checklist.\n');
   fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
   fixture.cli('register', 'beta', fixture.checkout, fixture.notes);
   fixture.cli('note-saves', 'alpha', 'enable');
@@ -932,8 +933,13 @@ test('a new save rejects citations outside its project or passage bounds', { tim
   assert.deepEqual(await save({ ...citation, location: { startLine, endLine: endLine + 1 } }),
     { error: 'evidence_unavailable' });
   assert.deepEqual(await save({ ...citation, text: '# Airship rollout\n' }), { error: 'invalid_argument' });
+  const { hits: [plainText] } = await client.call('search_project', { projectId: 'alpha', query: 'checklist' });
+  assert.equal(plainText.relativePath, 'status.txt');
+  const plainCitation = { sourceId: plainText.sourceId, contentHash: plainText.contentHash,
+    location: { startLine: plainText.startLine, endLine: plainText.endLine } };
+  assert.deepEqual(await save(plainCitation), { error: 'evidence_unavailable' });
   const { sources } = await client.call('list_sources', { projectId: 'alpha' });
-  assert.deepEqual(sources.map(source => source.sourceId), [sourceId]);
+  assert.deepEqual(sources.map(source => source.sourceId), [sourceId, plainText.sourceId]);
 });
 
 test('a fresh server can find a saved note through list, read, and both search modes',
