@@ -4,18 +4,21 @@ import {
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
-import { contentHash } from './evidence.ts';
+import { contentHash, lineLocation, versionHash } from './evidence.ts';
 import { textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
 import { canonicalLocation, checkOutsideRoots, hasDarwinAcl, id, MarginError, type Root } from './registry.ts';
 import { requireSource, savedNotesDirectory, savedNotesId, sourceId } from './sources.ts';
 
 const inputText = z.string().refine(text => text.isWellFormed());
+const noteCitations = z.array(z.strictObject({ sourceId: z.string(), contentHash: versionHash, location: lineLocation }))
+  .optional();
 export const noteInput = z.strictObject({
   projectId: id,
   requestId: inputText.refine(text => text.length > 0),
   title: inputText.refine(text => text.trim().length > 0),
-  body: inputText
+  body: inputText,
+  citations: noteCitations
 });
 type NoteInput = z.infer<typeof noteInput>;
 const metadataSchema = z.strictObject({
@@ -23,7 +26,8 @@ const metadataSchema = z.strictObject({
   projectId: id,
   createdAt: z.iso.datetime(),
   requestId: z.string(),
-  title: z.string()
+  title: z.string(),
+  citations: noteCitations
 });
 
 function missing(error: unknown) {
@@ -66,8 +70,9 @@ function requirePrivateDirectory(path: string) {
   }
 }
 
-function noteMarkdown({ projectId, requestId, title, body }: NoteInput, noteId: string, createdAt: string) {
-  return `---\n${JSON.stringify({ noteId, projectId, createdAt, requestId, title })}\n---\n\n# ${title}\n\n${body}`;
+function noteMarkdown({ projectId, requestId, title, body, citations }: NoteInput, noteId: string, createdAt: string) {
+  const metadata = { noteId, projectId, createdAt, requestId, title, citations: citations?.length ? citations : undefined };
+  return `---\n${JSON.stringify(metadata)}\n---\n\n# ${title}\n\n${body}`;
 }
 
 function existingNote(root: Root, relativePath: string, args: NoteInput, noteId: string) {
@@ -83,7 +88,7 @@ function existingNote(root: Root, relativePath: string, args: NoteInput, noteId:
   return createdAt;
 }
 
-export function commitNote(registryPath: string, allRoots: Root[], args: NoteInput) {
+export function commitNote(registryPath: string, allRoots: Root[], args: NoteInput, validateCitations: () => void) {
   const registry = canonicalLocation(registryPath);
   const relativePath = `${contentHash(JSON.stringify([registry, args.requestId]))}.md`;
   const noteId = sourceId(args.projectId, savedNotesId, relativePath);
@@ -99,6 +104,7 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
     const createdAt = new Date().toISOString();
     const text = noteMarkdown(args, noteId, createdAt);
     if (textLines(text).some(line => Buffer.byteLength(line) > maxBytes)) throw new MarginError('line_too_long');
+    validateCitations();
     const root = existingRoot ?? savedNoteRoot(registry, args.projectId, allRoots, true)!;
     const path = join(root.path, relativePath);
     const staged = join(root.path, `${randomUUID()}.tmp`);

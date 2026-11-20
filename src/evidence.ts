@@ -19,13 +19,16 @@ export function evidenceFormat(path: string) {
 
 const ordinal = z.number().int().positive();
 const seconds = z.number().finite().nonnegative();
+export const versionHash = z.string().regex(/^[a-f0-9]{64}$/);
+export const lineLocation = z.strictObject({ startLine: ordinal, endLine: ordinal });
+export type LineLocation = z.infer<typeof lineLocation>;
 export const evidenceLocation = z.union([
   z.strictObject({ page: ordinal, item: ordinal }),
   z.strictObject({ headingPath: z.array(z.string()), paragraph: ordinal }),
   z.strictObject({ image: z.literal(1), item: ordinal.optional() }),
   z.strictObject({ startSeconds: seconds, endSeconds: seconds }),
   z.strictObject({ timestampSeconds: seconds }),
-  z.strictObject({ startLine: ordinal, endLine: ordinal }),
+  lineLocation,
   z.strictObject({ item: ordinal }),
   z.strictObject({})
 ]);

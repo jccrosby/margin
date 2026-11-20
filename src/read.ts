@@ -39,9 +39,10 @@ export function readBytes(path: string, limit: number) {
   });
 }
 
-export function readText(path: string) {
+export function readText(path: string, checkBytes?: (bytes: Buffer) => void) {
   return readSource(path, fd => {
     const bytes = readFileSync(fd);
+    checkBytes?.(bytes);
     return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
   });
 }
