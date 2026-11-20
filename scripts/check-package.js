@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
-assert.ok(process.argv[2], 'Pass the path to the npm tarball.');
+assert.ok(process.argv[2], 'Pass the path to the package tarball.');
 const tarball = resolve(process.argv[2]);
 const sources = readdirSync(new URL('../src/', import.meta.url));
 const compiledFiles = sources.filter(file => file.endsWith('.ts'))
@@ -24,8 +24,8 @@ try {
   const registry = join(work, 'registry', 'projects.json');
   mkdirSync(checkout);
   execFileSync('git', ['init', '--quiet'], { cwd: checkout });
-  execFileSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund',
-    '--no-package-lock', '--no-save', tarball], { cwd: work, stdio: 'inherit' });
+  writeFileSync(join(work, 'package.json'), '{"private":true}\n');
+  execFileSync('pnpm', ['add', '--ignore-scripts', tarball], { cwd: work, stdio: 'inherit' });
 
   const executable = join(work, 'node_modules', '.bin', 'margin');
   const registryArgs = ['--registry', registry];
