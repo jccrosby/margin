@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -37,7 +37,7 @@ async function connect(t, { work, registry, env = process.env, nodeArgs = [] }) 
   const messages = createInterface({ input: child.stdout });
   t.after(() => {
     messages.close();
-    child.kill();
+    child.kill('SIGKILL');
   });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr += chunk; });
@@ -1024,6 +1024,8 @@ test('saves reject long lines before writing and accept the read limit', { timeo
   assert.deepEqual(readdirSync(dirname(fixture.registry)), initialFiles);
 
   const { noteId } = await client.call('save_project_note', args);
+  assert.deepEqual(await client.call('save_project_note', { ...args, body: body + 'x' }),
+    { error: 'note_request_conflict' });
   const first = await client.call('read_source', { projectId: 'alpha', sourceId: noteId });
   const rest = await client.call('read_source', { projectId: 'alpha', sourceId: noteId, startLine: first.nextStartLine });
   assert.equal(rest.text, body);
@@ -1079,3 +1081,75 @@ DatabaseSync.prototype.prepare = function (sql) {
   const found = await client.call('search_project', { projectId: 'alpha', query: 'coldstream' });
   assert.equal(found.hits[0].sourceId, result.noteId);
 });
+
+test('unsafe saved note storage leaves ordinary sources discoverable', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  writeFileSync(join(fixture.checkout, 'ordinary.md'), 'Find sharedmarker in this source.');
+  fixture.cli('refresh', 'alpha');
+  const client = await connect(t, fixture);
+  const { noteId } = await client.call('save_project_note',
+    { projectId: 'alpha', requestId: 'hidden', title: 'Private handoff', body: 'Find sharedmarker in this note.' });
+  assert.ok(noteId);
+  chmodSync(join(dirname(fixture.registry), '.margin-saved-notes'), 0o755);
+
+  const listing = await client.call('list_sources', { projectId: 'alpha' });
+  assert.deepEqual(listing.sources?.map(source => source.relativePath), ['ordinary.md'], JSON.stringify(listing));
+  assert.deepEqual(listing.warnings, [{ rootId: '@saved-notes', error: 'root_unavailable' }]);
+  assert.equal(listing.coverage.complete, false);
+  for (const mode of ['ranked', 'literal']) {
+    const result = await client.call('search_project', { projectId: 'alpha', query: 'sharedmarker', mode });
+    assert.deepEqual(result.hits.map(hit => hit.relativePath), ['ordinary.md']);
+    assert.equal(result.coverage.complete, false);
+    assert.deepEqual(result.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
+      [{ error: 'root_unavailable' }]);
+  }
+  assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId: noteId }),
+    { error: 'note_storage_unavailable' });
+});
+
+test('an inheritable ACL on the registry directory blocks private saves',
+  { timeout: 10000, skip: process.platform !== 'darwin' }, async t => {
+    const fixture = setup(t);
+    fixture.cli('register', 'alpha', fixture.checkout);
+    fixture.cli('note-saves', 'alpha', 'enable');
+    writeFileSync(join(fixture.checkout, 'ordinary.md'), 'Read ordinarymarker.');
+    fixture.cli('refresh', 'alpha');
+    const directory = dirname(fixture.registry);
+    execFileSync('/bin/chmod', ['+a', 'everyone allow read,search,file_inherit,directory_inherit', directory]);
+    execFileSync('/usr/bin/xattr', ['-w', 'com.example.margin-fixture', 'acl-test', directory]);
+    const before = readdirSync(directory);
+    const client = await connect(t, fixture);
+    const response = await client.call('save_project_note',
+      { projectId: 'alpha', requestId: 'unsafe-parent', title: 'Private handoff', body: 'Protect the note.' });
+    assert.deepEqual(response, { error: 'note_storage_unavailable' });
+    assert.deepEqual(readdirSync(directory), before);
+    const listed = await client.call('list_sources', { projectId: 'alpha' });
+    assert.deepEqual(listed.sources.map(source => source.relativePath), ['ordinary.md']);
+    assert.deepEqual(listed.warnings, []);
+    const found = await client.call('search_project', { projectId: 'alpha', query: 'ordinarymarker' });
+    assert.deepEqual(found.hits.map(hit => hit.relativePath), ['ordinary.md']);
+  });
+
+test('saved note text is not added to an index with an ACL',
+  { timeout: 10000, skip: process.platform !== 'darwin' }, async t => {
+    const fixture = setup(t);
+    fixture.cli('register', 'alpha', fixture.checkout);
+    fixture.cli('note-saves', 'alpha', 'enable');
+    fixture.cli('refresh', 'alpha');
+    const directory = dirname(fixture.registry);
+    const [index] = readdirSync(directory).filter(name => name.endsWith('.sqlite'));
+    assert.ok(index);
+    execFileSync('/bin/chmod', ['+a', 'everyone allow read', join(directory, index)]);
+    const before = readFileSync(join(directory, index));
+    const client = await connect(t, fixture);
+    const response = await client.call('save_project_note',
+      { projectId: 'alpha', requestId: 'unsafe-index', title: 'Private handoff', body: 'Protect the note.' });
+    assert.deepEqual(response, { error: 'index_unavailable' });
+    const refresh = spawnSync(process.execPath, [entry, '--registry', fixture.registry, 'refresh', 'alpha'],
+      { cwd: fixture.work, encoding: 'utf8' });
+    assert.equal(refresh.status, 1);
+    assert.match(refresh.stderr, /index_unavailable/);
+    assert.deepEqual(readFileSync(join(directory, index)), before);
+  });

@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   closeSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync,
   renameSync, rmSync, writeFileSync
@@ -52,6 +53,19 @@ function lstatOrMissing(path: string) {
     return lstatSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+export function hasDarwinAcl(path: string) {
+  if (process.platform !== 'darwin') return false;
+  try {
+    const listing = execFileSync('/bin/ls', ['-lde', '-q', path], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
+    });
+    // fix: Extended attributes can hide the ACL marker, but not the ACL entry lines.
+    return listing.trimEnd().includes('\n');
+  } catch {
+    return lstatOrMissing(path) !== undefined;
   }
 }
 

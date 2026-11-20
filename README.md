@@ -50,7 +50,9 @@ Use the same root ID to move that checkout.
 
 ## Save a project note
 
-Note saves are off by default. Enable them for a project from the terminal.
+Note saves are off by default. Keep the registry in a directory that only your local account can access. A directory with a macOS access control list (ACL) cannot store private notes.
+
+Enable saves for a project from the terminal.
 
 ```sh
 pnpm dlx -- "$margin_package" --registry "$margin_registry" note-saves demo enable

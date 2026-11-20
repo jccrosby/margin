@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { contentHash } from './evidence.ts';
 import { textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
-import { canonicalLocation, checkOutsideRoots, id, MarginError, type Root } from './registry.ts';
+import { canonicalLocation, checkOutsideRoots, hasDarwinAcl, id, MarginError, type Root } from './registry.ts';
 import { requireSource, savedNotesDirectory, savedNotesId, sourceId } from './sources.ts';
 
 const inputText = z.string().refine(text => text.isWellFormed());
@@ -34,9 +34,13 @@ export function savedNoteRoot(registryPath: string, projectId: string, allRoots:
   try {
     const registry = canonicalLocation(registryPath);
     const scope = [savedNotesDirectory, contentHash(basename(registry)), contentHash(projectId)];
-    const location = join(dirname(registry), ...scope);
+    const parent = dirname(registry);
+    if (!create && !lstatSync(join(parent, savedNotesDirectory), { throwIfNoEntry: false })) return undefined;
+    const location = join(parent, ...scope);
     checkOutsideRoots(location, allRoots, 'saved notes directory');
-    let directory = dirname(registry);
+    requirePrivateDirectory(parent);
+    if (hasDarwinAcl(parent)) throw new MarginError('note_storage_unavailable');
+    let directory = parent;
     for (const segment of scope) {
       directory = join(directory, segment);
       if (create) {
@@ -46,14 +50,18 @@ export function savedNoteRoot(registryPath: string, projectId: string, allRoots:
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         }
       }
-      const stat = lstatSync(directory);
-      if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) {
-        throw new MarginError('note_storage_unavailable');
-      }
+      requirePrivateDirectory(directory);
     }
     return { id: savedNotesId, kind: 'context', path: location };
   } catch (error) {
     if (!create && missing(error)) return undefined;
+    throw new MarginError('note_storage_unavailable');
+  }
+}
+
+function requirePrivateDirectory(path: string) {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) {
     throw new MarginError('note_storage_unavailable');
   }
 }
@@ -79,15 +87,20 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
   const registry = canonicalLocation(registryPath);
   const relativePath = `${contentHash(JSON.stringify([registry, args.requestId]))}.md`;
   const noteId = sourceId(args.projectId, savedNotesId, relativePath);
-  const createdAt = new Date().toISOString();
-  const text = noteMarkdown(args, noteId, createdAt);
-  if (textLines(text).some(line => Buffer.byteLength(line) > maxBytes)) throw new MarginError('line_too_long');
-  const root = savedNoteRoot(registry, args.projectId, allRoots, true)!;
-  const path = join(root.path, relativePath);
-  const reuse = () => ({ root, relativePath, noteId, createdAt: existingNote(root, relativePath, args, noteId) });
+  const reuse = (root: Root) => ({
+    root, relativePath, noteId, createdAt: existingNote(root, relativePath, args, noteId)
+  });
 
   try {
-    if (lstatSync(path, { throwIfNoEntry: false })) return reuse();
+    const existingRoot = savedNoteRoot(registry, args.projectId, allRoots);
+    if (existingRoot && lstatSync(join(existingRoot.path, relativePath), { throwIfNoEntry: false })) {
+      return reuse(existingRoot);
+    }
+    const createdAt = new Date().toISOString();
+    const text = noteMarkdown(args, noteId, createdAt);
+    if (textLines(text).some(line => Buffer.byteLength(line) > maxBytes)) throw new MarginError('line_too_long');
+    const root = existingRoot ?? savedNoteRoot(registry, args.projectId, allRoots, true)!;
+    const path = join(root.path, relativePath);
     const staged = join(root.path, `${randomUUID()}.tmp`);
     const fd = openSync(staged, 'wx', 0o600);
     try {
@@ -98,7 +111,7 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
         linkSync(staged, path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        return reuse();
+        return reuse(root);
       }
       const directory = openSync(root.path, 'r');
       try {

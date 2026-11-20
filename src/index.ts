@@ -8,7 +8,7 @@ import {
 import { fetchEvidence, linksId } from './links.ts';
 import { literalPassages, passageAtLines, rankedPassages, textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
-import { canonicalLocation, checkOutsideRoots, MarginError, type Project, type Root } from './registry.ts';
+import { canonicalLocation, checkOutsideRoots, hasDarwinAcl, MarginError, type Project, type Root } from './registry.ts';
 import { requireListedSource, requireSource, savedNotesId, scanPaths, sourceId } from './sources.ts';
 
 type IndexRoot = Root | { id: typeof linksId; kind: 'links'; path: ''; urls: string[] };
@@ -35,14 +35,15 @@ function rootKey(root: IndexRoot) {
   return JSON.stringify([root.id, root.kind, root.path]);
 }
 
-function indexPath(registryPath: string, projectId: string, roots: Root[]) {
+function indexPath(registryPath: string, projectId: string, roots: Root[], privateNotes = false) {
   // fix: Hash IDs to keep case variants separate on case-insensitive filesystems.
   const path = `${canonicalLocation(registryPath)}.${hash(projectId)}.sqlite`;
   for (const candidate of [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]) {
     checkOutsideRoots(candidate, roots, 'index');
     try {
       const stat = lstatSync(candidate);
-      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) {
+      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 ||
+          (privateNotes && (stat.uid !== process.getuid?.() || hasDarwinAcl(candidate)))) {
         throw new MarginError('index_unavailable');
       }
     } catch (error) {
@@ -141,8 +142,9 @@ function getRefresh(db: DatabaseSync | undefined, key: string): Refresh {
   return { status: row.status as string, refreshedAt: (row.refreshedAt ?? undefined) as string | undefined, gaps };
 }
 
-export async function refreshProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[]) {
-  const db = openIndex(indexPath(registryPath, projectId, allRoots), true)!;
+export async function refreshProject(registryPath: string, projectId: string, roots: IndexRoot[], allRoots: Root[],
+  privateNotes = false) {
+  const db = openIndex(indexPath(registryPath, projectId, allRoots, privateNotes), true)!;
   try {
     const registered = [...roots.map(root => root.id), savedNotesId];
     const placeholders = registered.map(() => '?').join(', ');
@@ -251,7 +253,7 @@ function textPublisher(db: DatabaseSync, rootId: string, key: string) {
 
 export function indexSavedNote(registryPath: string, projectId: string, allRoots: Root[], root: Root,
   relativePath: string) {
-  const db = openIndex(indexPath(registryPath, projectId, allRoots), true)!;
+  const db = openIndex(indexPath(registryPath, projectId, allRoots, true), true)!;
   try {
     db.exec('BEGIN IMMEDIATE');
     const key = rootKey(root);
@@ -359,9 +361,10 @@ function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inven
 }
 
 function withIndex<T>(
-  registryPath: string, projectId: string, allRoots: Root[], read: (db: DatabaseSync | undefined) => T
+  registryPath: string, projectId: string, allRoots: Root[], read: (db: DatabaseSync | undefined) => T,
+  privateNotes = false
 ) {
-  const db = openIndex(indexPath(registryPath, projectId, allRoots), false);
+  const db = openIndex(indexPath(registryPath, projectId, allRoots, privateNotes), false);
   try {
     db?.exec('BEGIN');
     return read(db);
@@ -376,7 +379,8 @@ function withIndex<T>(
 export function indexCoverage(registryPath: string, projectId: string, roots: IndexRoot[],
   allRoots: Root[], inventory: Inventory) {
   try {
-    return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory));
+    return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory),
+      roots.some(root => root.id === savedNotesId));
   } catch {
     const coverage = collectCoverage(undefined, roots, inventory);
     for (const root of coverage.roots) root.gaps.push({ error: 'index_unavailable' });
@@ -582,7 +586,7 @@ export function searchProject(registryPath: string, projectId: string, roots: In
       }
     }
     return { hits, coverage };
-  });
+  }, roots.some(root => root.id === savedNotesId));
 }
 
 function verify(root: Root, relativePath: string, expected: string, coverage: Coverage) {
