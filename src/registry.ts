@@ -6,14 +6,14 @@ import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'n
 import { z } from 'zod';
 
 import { requireGitCheckout } from './git.ts';
-import { entryPath, requirePrivateAccess, withDirectory, withEntry } from './macos.ts';
+import { entryPath, isNativeAbsolutePath, requirePrivateAccess, verifyVolume, windows, withDirectory, withEntry } from './filesystem.ts';
 import { isMissing, readPrivateFile, requirePrivateDirectory } from './storage.ts';
 
 export const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 const root = z.strictObject({
   id,
   kind: z.enum(['git', 'context']),
-  path: z.string().refine(path => isAbsolute(path) && normalize(path) === path)
+  path: z.string().refine(path => isNativeAbsolutePath(path) && normalize(path) === path)
 });
 export function approvedHttpsUrl(value: string) {
   if (!/^https:\/\//i.test(value) || /[\s\\]/.test(value)) return undefined;
@@ -44,6 +44,10 @@ export class MarginError extends Error {
 }
 
 export function unsafeStorage(code: string, path: string) {
+  if (windows) {
+    return new MarginError(code, `Check ${path}. Use a private directory on a local NTFS drive. ` +
+      'Remove other users’ access grants and links, or choose a directory under your Windows profile.');
+  }
   return new MarginError(code, `Check ${JSON.stringify(path)}. Use a local APFS directory you own with mode 0700. ` +
     'Set files to mode 0600. Remove ACL grants and links, or choose a different private location.');
 }
@@ -68,19 +72,15 @@ export function loadRegistry(path: string) {
 }
 
 export function registryLocation(path: string) {
-  if (path.split(sep).includes('..')) {
+  if ((windows ? path.split(/[\\/]/) : path.split(sep)).includes('..')) {
     throw new MarginError('registry_unavailable',
-      `Check ${JSON.stringify(path)}. Use an absolute registry path without '..' segments.`);
+      `Check ${windows ? path : JSON.stringify(path)}. Use an absolute registry path without '..' segments.`);
   }
   try {
-    if (!isAbsolute(path) || !path.isWellFormed()) throw new Error('Invalid registry path.');
+    if (!isNativeAbsolutePath(path)) throw new Error('Invalid registry path.');
     const normalized = normalize(path);
-    const systemDirectory = `/${normalized.split('/')[1]}`;
-    const entry = lstatOrMissing(systemDirectory);
-    // Allow root-owned aliases such as /tmp. Reject links inside managed paths.
-    const location = entry?.uid === 0 && entry.isSymbolicLink() && systemDirectory !== normalized
-      ? join(realpathSync.native(systemDirectory), normalized.slice(systemDirectory.length))
-      : normalized;
+    verifyVolume(normalized);
+    const location = windows ? normalized : resolveSystemAlias(normalized);
     const name = basename(location);
     const parent = canonicalParent(dirname(location));
     try {
@@ -94,11 +94,20 @@ export function registryLocation(path: string) {
   }
 }
 
+function resolveSystemAlias(path: string) {
+  // Allow root-owned aliases such as /tmp. Reject links inside managed paths.
+  const systemDirectory = `/${path.split('/')[1]}`;
+  const entry = lstatOrMissing(systemDirectory);
+  return entry?.uid === 0 && entry.isSymbolicLink() && systemDirectory !== path
+    ? join(realpathSync.native(systemDirectory), path.slice(systemDirectory.length))
+    : path;
+}
+
 function canonicalParent(path: string): string {
   try {
     return withDirectory(path, entryPath);
   } catch (error) {
-    if (!isMissing(error) || path === '/') throw error;
+    if (!isMissing(error) || dirname(path) === path) throw error;
     return join(canonicalParent(dirname(path)), basename(path));
   }
 }
@@ -161,7 +170,7 @@ function writeProject(path: string, projectId: string, update: (current: Project
   let descriptor;
   try {
     requirePrivateDirectory(parent, true);
-    descriptor = openSync(lock, 'wx', 0o600);
+    descriptor = openSync(lock, 'wx+', 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       try {
@@ -184,7 +193,7 @@ function writeProject(path: string, projectId: string, update: (current: Project
     try {
       requirePrivateDirectory(temporary);
       const staged = join(temporary, 'projects.json');
-      const fd = openSync(staged, 'wx', 0o600);
+      const fd = openSync(staged, 'wx+', 0o600);
       try {
         requirePrivateAccess(fd);
         writeFileSync(fd, JSON.stringify({ projects }, null, 2) + '\n');
@@ -203,17 +212,21 @@ function writeProject(path: string, projectId: string, update: (current: Project
 
 function directory(path: string) {
   try {
-    if (!isAbsolute(path) || !path.isWellFormed()) throw new Error('Relative root path.');
+    if (!isNativeAbsolutePath(path)) throw new Error('Relative root path.');
+    verifyVolume(normalize(path));
     const canonical = realpathSync.native(path);
+    if (!isNativeAbsolutePath(canonical)) throw new Error('Unsupported root path.');
     withDirectory(canonical, () => undefined);
     return canonical;
   } catch {
-    throw new MarginError('root_unavailable', `Use an absolute path to a local APFS directory. Check ${path}.`);
+    const filesystem = windows ? 'NTFS' : 'APFS';
+    throw new MarginError('root_unavailable', `Use an absolute path to a local ${filesystem} directory. Check ${path}.`);
   }
 }
 
 export function checkOutsideRoots(path: string, roots: Root[], name = 'registry') {
   const within = (location: string) => {
+    if (windows) return path === location || path.startsWith(location.endsWith(sep) ? location : location + sep);
     const suffix = relative(location, path);
     return !suffix || (suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix));
   };

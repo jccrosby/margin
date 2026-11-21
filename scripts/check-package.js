@@ -1,24 +1,38 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 
 assert.ok(process.argv[2], 'Pass the path to the package tarball.');
+assert.ok(process.argv[3] === undefined || process.argv[3] === '--candidate', 'Use --candidate to test a release candidate.');
 const tarball = resolve(process.argv[2]);
+const candidate = process.argv[3] === '--candidate';
+const windows = process.platform === 'win32';
 const manifest = JSON.parse(execFileSync('tar', ['-xOzf', tarball, 'package/package.json'], {
   encoding: 'utf8'
 }));
-assert.ok(Array.isArray(manifest.os) && manifest.os.length === 1 && manifest.os[0] === 'darwin',
-  'Release blocked. Run the required native checks and qualify the same tarball on all three targets before enabling cross-platform publication.');
-assert.deepEqual(manifest.cpu, ['arm64']);
+if (candidate) {
+  assert.ok(manifest.os?.includes(process.platform), 'The tarball must support this operating system.');
+  assert.ok(manifest.cpu?.includes(process.arch), 'The tarball must support this architecture.');
+} else {
+  assert.ok(Array.isArray(manifest.os) && manifest.os.length === 1 && manifest.os[0] === 'darwin',
+    'Release blocked. Run the required native checks and qualify the same tarball on all three targets before enabling cross-platform publication.');
+  assert.deepEqual(manifest.cpu, ['arm64']);
+}
 const sources = readdirSync(new URL('../src/', import.meta.url));
 const compiledFiles = sources.filter(file => file.endsWith('.ts'))
   .map(file => `package/dist/${file.replace(/\.ts$/, '.js')}`);
-const files = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' }).trim().split('\n');
+const files = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' }).trim().split(/\r?\n/);
+const macosAddon = 'package/dist/macos.node';
+const windowsAddon = 'package/dist/windows.node';
+const requiredAddon = windows ? windowsAddon : macosAddon;
+const otherAddon = windows ? macosAddon : windowsAddon;
+const optionalAddons = candidate && files.includes(otherAddon) ? [otherAddon] : [];
 assert.deepEqual(files.sort(), [
-  'package/README.md', 'package/package.json', 'package/dist/macos.node', ...compiledFiles
+  'package/README.md', 'package/package.json', requiredAddon, ...optionalAddons, ...compiledFiles
 ].sort());
 assert.equal(manifest.name, '@jccrosby/margin');
 assert.deepEqual(manifest.bin, { margin: 'dist/margin.js' });
@@ -27,7 +41,7 @@ const work = realpathSync(mkdtempSync(join(tmpdir(), 'margin-package-')));
 try {
   const checkout = join(work, 'checkout á');
   const extra = join(work, 'another checkout');
-  const registry = join(work, 'registry', 'projects.json');
+  const registry = join(work, 'Registry á', 'projects.json');
   for (const root of [checkout, extra]) {
     mkdirSync(root);
     execFileSync('git', ['init', '--quiet'], { cwd: root });
@@ -35,20 +49,40 @@ try {
   }
 
   const registryArgs = ['--registry', registry];
-  const pnpmArgs = ['dlx', '--reporter=silent', `--store-dir=${join(work, 'pnpm-store')}`, '--', tarball];
-  const registration = execFileSync('pnpm', [...pnpmArgs, ...registryArgs, 'register', 'smoke', checkout], {
-    cwd: work, encoding: 'utf8', env: { ...process.env, XDG_CACHE_HOME: join(work, 'pnpm-cache') }
-  });
-  assert.equal(registration.trim(), 'Registered smoke.');
-
-  const npmArgs = ['--yes', '--package', tarball, '--', 'margin', ...registryArgs];
   const env = { ...process.env, npm_config_cache: join(work, 'npm-cache') };
-  execFileSync('npx', [...npmArgs, 'add-checkout', 'smoke', 'extra', extra], { cwd: work, env });
-  execFileSync('npx', [...npmArgs, 'refresh', 'smoke'], { cwd: work, env });
+  let executable;
+  let args;
+  if (windows) {
+    const install = join(work, 'Margin á');
+    const npm = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+    mkdirSync(install);
+    execFileSync(process.execPath, [npm, 'install', '--prefix', install, '--ignore-scripts', tarball], {
+      cwd: work, env, stdio: 'inherit'
+    });
+    executable = process.execPath;
+    args = [join(install, 'node_modules', '@jccrosby', 'margin', 'dist', 'margin.js'), ...registryArgs];
+    assert.equal(execFileSync(executable, [...args, 'register', 'smoke', checkout], {
+      cwd: work, env, encoding: 'utf8'
+    }).trim(), 'Registered smoke.');
+  } else {
+    const pnpmArgs = ['dlx', '--reporter=silent', `--store-dir=${join(work, 'pnpm-store')}`, '--', tarball];
+    const registration = execFileSync('pnpm', [...pnpmArgs, ...registryArgs, 'register', 'smoke', checkout], {
+      cwd: work, encoding: 'utf8', env: { ...process.env, XDG_CACHE_HOME: join(work, 'pnpm-cache') }
+    });
+    assert.equal(registration.trim(), 'Registered smoke.');
+    executable = 'npx';
+    args = ['--yes', '--package', tarball, '--', 'margin', ...registryArgs];
+  }
+  execFileSync(executable, [...args, 'add-checkout', 'smoke', 'extra', extra], { cwd: work, env });
+  execFileSync(executable, [...args, 'refresh', 'smoke'], { cwd: work, env });
 
-  const server = spawn('npx', [...npmArgs, 'serve'], { cwd: work, env, stdio: ['pipe', 'pipe', 'inherit'] });
+  const server = spawn(executable, [...args, 'serve'], { cwd: work, env, stdio: ['pipe', 'pipe', 'inherit'] });
+  const exited = once(server, 'exit');
   const lines = createInterface({ input: server.stdout });
-  const deadline = setTimeout(() => server.kill(), 10_000);
+  const deadline = setTimeout(() => {
+    lines.close();
+    server.kill();
+  }, 15_000);
   try {
     const responses = lines[Symbol.asyncIterator]();
     server.stdin.write(JSON.stringify({
@@ -87,9 +121,12 @@ try {
     clearTimeout(deadline);
     lines.close();
     server.stdin.end();
+    const stop = setTimeout(() => server.kill(), 1000);
+    await exited;
+    clearTimeout(stop);
   }
 } finally {
   rmSync(work, { recursive: true, force: true });
 }
 
-console.log('Checked the tarball, both CLI launchers, and MCP project and source listings.');
+console.log('Checked the tarball, installed CLI, and MCP project and source listings.');
