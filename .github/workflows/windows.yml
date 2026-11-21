@@ -43,6 +43,16 @@ jobs:
           pnpm pack --out $tarball
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check-package.js $tarball --candidate
+      - name: Open evidence in a fresh Codex thread
+        env:
+          MARGIN_TEST_EXTRACTORS: '1'
+        run: |
+          $codex = Join-Path $env:RUNNER_TEMP 'codex'
+          npm install --prefix $codex --ignore-scripts --no-save '@openai/codex@0.171.0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tarball = Join-Path $env:RUNNER_TEMP 'margin.tgz'
+          $entry = Join-Path $codex 'node_modules/@openai/codex/bin/codex.js'
+          node scripts/check-codex.js $tarball $entry
       - name: Run CLI and MCP tests
         timeout-minutes: 8
         env:
