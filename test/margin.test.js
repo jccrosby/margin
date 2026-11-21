@@ -1167,7 +1167,7 @@ fs.writeFileSync = (destination, data, options) => {
 };
 syncBuiltinESMExports();
 `);
-  const writer = await connect(t, { ...fixture, nodeArgs: ['--import', hook] });
+  const writer = await connect(t, { ...fixture, nodeArgs: ['--import', pathToFileURL(hook).href] });
   const args = { projectId: 'alpha', requestId: 'interrupt', title: 'Handoff', body: 'frozencaribou' };
   writer.sendCall('save_project_note', args);
   for (let attempt = 0; !existsSync(marker) && attempt < 100; attempt++) await delay(25);
@@ -1259,7 +1259,7 @@ DatabaseSync.prototype.prepare = function (sql) {
   return prepare.call(this, sql);
 };
 `);
-  const client = await connect(t, { ...fixture, nodeArgs: ['--import', hook] });
+  const client = await connect(t, { ...fixture, nodeArgs: ['--import', pathToFileURL(hook).href] });
   const result = await client.call('save_project_note',
     { projectId: 'alpha', requestId: 'cold-index', title: 'Handoff', body: 'Check coldstream.' });
   assert.ok(result.noteId, JSON.stringify(result));
@@ -1502,7 +1502,7 @@ fs.readSync = (fd, ...args) => {
 };
 syncBuiltinESMExports();
 `);
-  const client = await connect(t, { ...fixture, nodeArgs: ['--import', hook] });
+  const client = await connect(t, { ...fixture, nodeArgs: ['--import', pathToFileURL(hook).href] });
   const { sources: [{ sourceId }] } = await client.call('list_sources', { projectId: 'alpha' });
   const read = () => client.call('read_source', { projectId: 'alpha', sourceId });
   assert.equal((await read()).text, 'verified content\n');
