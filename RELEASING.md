@@ -52,3 +52,20 @@ In GitHub package settings, confirm **Private** visibility and grant readers dir
    ```
 
 4. Record the version, source commit, tarball SHA-256, and check results. Keep tokens, local paths, and project data out of the record.
+
+## Check a Windows candidate
+
+Run these commands on Windows with native Node.js 26 x64, Git, Python, and Visual Studio C++ build tools.
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm test
+$tarball = Join-Path $env:TEMP 'margin.tgz'
+pnpm pack --out $tarball
+node scripts/check-package.js $tarball --candidate
+```
+
+The check installs the archive outside the checkout. It starts the installed CLI and MCP server through Node. Use the [Windows setup guide](docs/windows.md) to also check a fresh Codex session on Windows 11 25H2.
+
+The release workflow blocks cross-platform publication until native qualification passes.

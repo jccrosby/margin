@@ -4,15 +4,15 @@
   "packageManager": "pnpm@12.18.0",
   "type": "module",
   "bin": {"margin": "dist/margin.js"},
-  "files": ["dist/*.js", "dist/macos.node"],
-  "os": ["darwin"],
-  "cpu": ["arm64"],
+  "files": ["dist/*.js", "dist/macos.node", "dist/windows.node"],
+  "os": ["darwin", "win32"],
+  "cpu": ["arm64", "x64"],
   "engines": {"node": ">=26 <27"},
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/build-native.js",
+    "build": "node -e \"require('node:fs').rmSync('dist', {recursive: true, force: true})\" && tsc -p tsconfig.build.json && node scripts/build-native.js",
     "prepack": "pnpm run build",
     "release:bootstrap": "bash scripts/bootstrap-release.sh",
     "release:verify": "bash scripts/verify-release.sh",

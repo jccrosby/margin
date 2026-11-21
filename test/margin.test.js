@@ -9,13 +9,21 @@ import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const windows = process.platform === 'win32';
+const macTest = process.platform === 'darwin' ? test : test.skip;
+const windowsTest = windows ? test : test.skip;
+
+function linkDirectory(target, path) {
+  symlinkSync(target, path, windows ? 'junction' : 'dir');
+}
 
 const entry = fileURLToPath(new URL('../src/margin.ts', import.meta.url));
 
 function setup(t) {
   const work = realpathSync(mkdtempSync(join(tmpdir(), 'margin-test-')));
-  t.after(() => rmSync(work, { recursive: true, force: true }));
+  t.after(() => rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const checkout = join(work, 'checkout');
   const notes = join(work, 'notes');
   const registry = join(work, 'private', 'projects.json');
@@ -23,6 +31,7 @@ function setup(t) {
   mkdirSync(notes);
   const git = (...args) => run(checkout, 'git', ...args);
   git('init', '--quiet');
+  if (windows) git('config', 'core.autocrlf', 'false');
   const cli = (...args) => run(work, process.execPath, entry, '--registry', registry, ...args);
   return { work, checkout, notes, registry, git, cli };
 }
@@ -36,9 +45,12 @@ function run(cwd, command, ...args) {
 async function connect(t, { work, registry, env = process.env, nodeArgs = [] }) {
   const child = spawn(process.execPath, [...nodeArgs, entry, '--registry', registry, 'serve'], { cwd: work, env });
   const messages = createInterface({ input: child.stdout });
-  t.after(() => {
+  t.after(async () => {
     messages.close();
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exited = once(child, 'exit');
     child.kill('SIGKILL');
+    await exited;
   });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr += chunk; });
@@ -115,8 +127,8 @@ test('inventory applies Git, format, and path rules on each live page', { timeou
   put(fixture.notes, 'id_ed25519');
   mkdirSync(join(fixture.notes, 'dist'));
   put(fixture.notes, 'dist/hidden.md');
-  symlinkSync(join(fixture.notes, 'README.md'), join(fixture.checkout, 'linked.md'));
-  symlinkSync(join(fixture.notes, 'dist'), join(fixture.notes, 'linked-directory'));
+  if (!windows) symlinkSync(join(fixture.notes, 'README.md'), join(fixture.checkout, 'linked.md'));
+  linkDirectory(join(fixture.notes, 'dist'), join(fixture.notes, 'linked-directory'));
   fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
   fixture.cli('register', 'beta', fixture.checkout, fixture.notes);
   const client = await connect(t, fixture);
@@ -190,7 +202,7 @@ test('reads live whole lines from both roots and rejects references outside them
   assert.deepEqual(await read(code.sourceId, { startLine: 2 }), { error: 'line_too_long' });
   assert.deepEqual(await read(code.sourceId, { startLine: 3 }), { ...code, text: '' });
 
-  symlinkSync(fixture.work, join(fixture.notes, 'link'));
+  linkDirectory(fixture.work, join(fixture.notes, 'link'));
   assert.deepEqual(await read(sourceId('notes', 'link/outside.md')), unavailable);
   writeFileSync(join(fixture.notes, '.env'), 'Password fixture\n');
   assert.deepEqual(await read(sourceId('notes', '.env')), unavailable);
@@ -200,7 +212,7 @@ test('reads live whole lines from both roots and rejects references outside them
   assert.deepEqual(await read(note.sourceId), unavailable);
   const relocated = join(fixture.work, 'relocated');
   renameSync(fixture.notes, relocated);
-  symlinkSync(relocated, fixture.notes);
+  linkDirectory(relocated, fixture.notes);
   assert.deepEqual(await read(note.sourceId), { error: 'root_unavailable' });
   rmSync(fixture.notes);
   writeFileSync(join(relocated, 'requirement.md'), 'Revised.\n');
@@ -223,7 +235,7 @@ test('register rejects registry paths inside a checkout, including case aliases'
   }
 });
 
-test('reads a source whose Git path uses a different Unicode form', { timeout: 10000 }, async t => {
+macTest('reads a source whose Git path uses a different Unicode form', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   const diskName = 'cafe\u0301.ts';
   const gitName = 'caf\u00e9.ts';
@@ -441,7 +453,7 @@ test('partial refresh retains an unreadable source and publishes other changes',
   assert.equal(recovered.hits.length, 1);
 });
 
-test('a failed root scan preserves that root index while another root publishes', { timeout: 15000 }, async t => {
+macTest('a failed root scan preserves that root index while another root publishes', { timeout: 15000 }, async t => {
   const fixture = setup(t);
   writeFileSync(join(fixture.checkout, 'code.ts'), 'fixtureWord\n');
   writeFileSync(join(fixture.notes, 'notes.md'), 'oldNote\n');
@@ -464,7 +476,7 @@ test('a failed root scan preserves that root index while another root publishes'
   assert.deepEqual(listing.warnings, [{ rootId: 'code', error: 'root_scan_failed' }]);
 });
 
-test('an interrupted refresh keeps the last committed index and retry replaces it once', { timeout: 20000 }, async t => {
+macTest('an interrupted refresh keeps the last committed index and retry replaces it once', { timeout: 20000 }, async t => {
   const fixture = setup(t);
   writeFileSync(join(fixture.checkout, 'keep.ts'), 'fixtureWord\n');
   const removed = join(fixture.checkout, 'remove.ts');
@@ -519,7 +531,7 @@ test('a literal citation must include the complete match', { timeout: 10000 }, a
   assert.deepEqual(results.coverage.roots[0].gaps, [{ error: 'citation_unavailable', relativePath: 'large.ts' }]);
 });
 
-test('readers see the last commit while a refresh spills pages and after it dies', { timeout: 25000 }, async t => {
+macTest('readers see the last commit while a refresh spills pages and after it dies', { timeout: 25000 }, async t => {
   const fixture = setup(t);
   writeFileSync(join(fixture.checkout, 'keep.ts'), 'fixtureWord\n');
   fixture.cli('register', 'alpha', fixture.checkout);
@@ -566,7 +578,7 @@ DatabaseSync.prototype.exec = function (sql) {
 });
 
 
-test('opens a versioned physical PDF page and reports a saved citation stale after edit', { timeout: 10000 }, async t => {
+macTest('opens a versioned physical PDF page and reports a saved citation stale after edit', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   const pdf = join(fixture.checkout, 'reference.pdf');
   writeFileSync(pdf, 'synthetic PDF bytes');
@@ -621,7 +633,7 @@ function runWithEnv({ work, registry }, env, ...args) {
   return spawnSync(process.execPath, [entry, '--registry', registry, ...args], { cwd: work, env, encoding: 'utf8' });
 }
 
-test('distinguishes repeated Word headings in a second Git checkout', { timeout: 10000 }, async t => {
+macTest('distinguishes repeated Word headings in a second Git checkout', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   const second = join(fixture.work, 'another-checkout');
   mkdirSync(second);
@@ -677,7 +689,7 @@ globalThis.fetch = async (url, { redirect }) => {
     fixture.cli('approve-url', 'demo', `https://example.test/${path}`);
   }
   const started = new Date().toISOString();
-  const refresh = runWithEnv(fixture, { ...process.env, NODE_OPTIONS: `--import=${shim}` }, 'refresh', 'demo');
+  const refresh = runWithEnv(fixture, { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(shim)}` }, 'refresh', 'demo');
   assert.equal(refresh.status, 1, refresh.stderr || refresh.stdout);
   assert.ok(JSON.parse(refresh.stdout).roots.flatMap(root => root.gaps)
     .some(gap => gap.error === 'redirect_not_approved' && gap.relativePath === 'https://example.test/blocked'));
@@ -708,7 +720,7 @@ globalThis.fetch = async (url, { redirect }) => {
     gap.error === 'citation_unavailable' && gap.relativePath === 'https://example.test/lines'));
 });
 
-test('opens the original image when no OCR text can be extracted', { timeout: 10000 }, async t => {
+macTest('opens the original image when no OCR text can be extracted', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMBAAFc9GgdAAAAAElFTkSuQmCC', 'base64');
   writeFileSync(join(fixture.checkout, 'diagram.png'), png);
@@ -730,7 +742,7 @@ test('opens the original image when no OCR text can be extracted', { timeout: 10
   assert.deepEqual(JSON.parse(content[0].text).failures, ['ocr_unavailable']);
 });
 
-test('opens a timed transcript and reports the actual selected frame timestamp', { timeout: 15000 }, async t => {
+macTest('opens a timed transcript and reports the actual selected frame timestamp', { timeout: 15000 }, async t => {
   if (['ffmpeg', 'ffprobe'].some(command => spawnSync(command, ['-version']).error?.code === 'ENOENT')) {
     t.skip('FFmpeg is unavailable.');
     return;
@@ -811,7 +823,7 @@ test('scores only complete live text evidence in the first five results', { time
   assert.ok(!JSON.stringify(details).includes('The pairMarker applies'));
 });
 
-test('ends a stalled score run without printing private data', { timeout: 12000 }, t => {
+macTest('ends a stalled score run without printing private data', { timeout: 12000 }, t => {
   const fixture = setup(t);
   fixture.cli('register', 'demo', fixture.checkout);
   const manifest = join(fixture.work, 'private', 'cases.json');
@@ -981,7 +993,7 @@ test('a fresh server can find a saved note through list, read, and both search m
     for (const mode of ['ranked', 'literal']) assert.deepEqual((await search('alpha', mode)).hits, []);
   });
 
-test('saved project notes survive export, index rebuild, and restore', { timeout: 15000 }, async t => {
+macTest('saved project notes survive export, index rebuild, and restore', { timeout: 15000 }, async t => {
   const fixture = setup(t);
   const projectId = 'alpha';
   fixture.cli('register', projectId, fixture.checkout, fixture.notes);
@@ -1119,7 +1131,7 @@ test('retries recover a lost save response and concurrent calls never replace no
   assert.notEqual(firstSaves[0].noteId, firstSaves[1].noteId);
 });
 
-test('an interrupted save exposes no partial Markdown file', { timeout: 15000 }, async t => {
+macTest('an interrupted save exposes no partial Markdown file', { timeout: 15000 }, async t => {
   const fixture = setup(t);
   fixture.cli('register', 'alpha', fixture.checkout);
   fixture.cli('note-saves', 'alpha', 'enable');
@@ -1291,7 +1303,7 @@ test('a matching save retry restores search for a committed note', { timeout: 10
     .map(path => basename(path)), [saved.relativePath]);
 });
 
-test('unsafe saved note storage leaves ordinary sources discoverable', { timeout: 10000 }, async t => {
+macTest('unsafe saved note storage leaves ordinary sources discoverable', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   fixture.cli('register', 'alpha', fixture.checkout);
   fixture.cli('note-saves', 'alpha', 'enable');
@@ -1324,7 +1336,7 @@ test('unsafe saved note storage leaves ordinary sources discoverable', { timeout
   assert.ok(unavailable.detail.includes(join(dirname(fixture.registry), '.margin-saved-notes')));
 });
 
-test('an inheritable ACL blocks registry access without changing existing files',
+macTest('an inheritable ACL blocks registry access without changing existing files',
   { timeout: 10000, skip: process.platform !== 'darwin' }, async t => {
     const fixture = setup(t);
     fixture.cli('register', 'alpha', fixture.checkout);
@@ -1350,7 +1362,7 @@ test('an inheritable ACL blocks registry access without changing existing files'
     assert.deepEqual(readdirSync(directory), before);
   });
 
-test('a saved note stays private and discoverable when its index is unavailable',
+macTest('a saved note stays private and discoverable when its index is unavailable',
   { timeout: 10000, skip: process.platform !== 'darwin' }, async t => {
     const fixture = setup(t);
     fixture.cli('register', 'alpha', fixture.checkout);
@@ -1425,7 +1437,7 @@ test('root aliases preserve Git IDs and matching citations after a root moves', 
   const alias = join(fixture.work, 'Alias café');
   const source = 'crème brûlée.md';
   writeFileSync(join(fixture.checkout, source), 'marker with stable content\n');
-  symlinkSync(fixture.checkout, alias);
+  linkDirectory(fixture.checkout, alias);
   fixture.cli('register', 'alpha', fixture.checkout);
   fixture.cli('add-checkout', 'alpha', 'extra', alias);
   fixture.cli('refresh', 'alpha');
@@ -1442,7 +1454,7 @@ test('root aliases preserve Git IDs and matching citations after a root moves', 
   const moved = join(fixture.work, 'Checkout déplacé');
   renameSync(fixture.checkout, moved);
   rmSync(alias);
-  symlinkSync(moved, alias);
+  linkDirectory(moved, alias);
   assert.deepEqual(await client.call('open_evidence', citation), { error: 'root_unavailable' });
   fixture.cli('add-checkout', 'alpha', 'extra', alias);
   assert.equal((await client.call('open_evidence', citation)).text, 'marker with stable content\n');
@@ -1450,7 +1462,7 @@ test('root aliases preserve Git IDs and matching citations after a root moves', 
   assert.deepEqual(await client.call('open_evidence', citation), { error: 'stale_citation' });
 });
 
-test('a source path replacement during read cannot change the opened file', { timeout: 10000 }, async t => {
+macTest('a source path replacement during read cannot change the opened file', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   const name = 'entry.md';
   const original = join(fixture.notes, name);
@@ -1480,7 +1492,7 @@ syncBuiltinESMExports();
   assert.equal((await read()).text, 'replacement content\n');
 });
 
-test('registration checks filesystem type and protects custom storage paths', t => {
+macTest('registration checks filesystem type and protects custom storage paths', t => {
   const fixture = setup(t);
   fixture.cli('register', 'alpha', fixture.checkout);
   const before = readFileSync(fixture.registry);
@@ -1500,7 +1512,7 @@ test('registration checks filesystem type and protects custom storage paths', t 
   assert.deepEqual(readFileSync(fixture.registry), before);
 });
 
-test('an ACL on a SQLite sidecar blocks access before SQLite opens it', t => {
+macTest('an ACL on a SQLite sidecar blocks access before SQLite opens it', t => {
   const fixture = setup(t);
   fixture.cli('register', 'alpha', fixture.checkout);
   fixture.cli('refresh', 'alpha');
@@ -1522,7 +1534,7 @@ test('a registry path with a parent segment never selects another registry', { t
   fixture.cli('register', 'alpha', fixture.checkout);
   const before = readFileSync(fixture.registry);
   const prefix = join(fixture.work, 'linked directory');
-  symlinkSync(fixture.checkout, prefix);
+  linkDirectory(fixture.checkout, prefix);
   const ambiguous = { ...fixture, registry: `${prefix}/../private/projects.json` };
   const register = runWithEnv(ambiguous, process.env, 'register', 'beta', fixture.checkout);
   assert.equal(register.status, 1);
@@ -1536,7 +1548,7 @@ test('a registry path with a parent segment never selects another registry', { t
   assert.ok(listing.detail?.includes(ambiguous.registry));
 });
 
-test('unsafe extractor output reports its location and keeps other sources searchable', { timeout: 10000 }, async t => {
+macTest('unsafe extractor output reports its location and keeps other sources searchable', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   writeFileSync(join(fixture.checkout, 'evidence.pdf'), 'PDF fixture');
   writeFileSync(join(fixture.checkout, 'ordinary.md'), 'ordinarymarker');
@@ -1558,4 +1570,26 @@ test('unsafe extractor output reports its location and keeps other sources searc
   assert.equal(evidence.failureDetails?.evidence_storage_unavailable, gap.detail);
   const search = await client.call('search_project', { projectId: 'alpha', query: 'ordinarymarker' });
   assert.deepEqual(search.hits.map(hit => hit.relativePath), ['ordinary.md']);
+});
+
+windowsTest('NTFS keeps Unicode filename spellings and skips junctions inside a root', { timeout: 15000 }, async t => {
+  const fixture = setup(t);
+  const first = 'caf\u00e9.md';
+  const second = 'cafe\u0301.md';
+  writeFileSync(join(fixture.notes, first), 'Original spelling.\n');
+  writeFileSync(join(fixture.notes, second), 'Distinct spelling.\n');
+  writeFileSync(join(fixture.work, 'outside.md'), 'Outside the root.\n');
+  linkDirectory(fixture.work, join(fixture.notes, 'junction'));
+  fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
+  fixture.cli('refresh', 'alpha');
+  const client = await connect(t, fixture);
+  const { sources } = await client.call('list_sources', { projectId: 'alpha' });
+  assert.deepEqual(sources.map(source => source.relativePath), [second, first]);
+  assert.notEqual(sources[0].sourceId, sources[1].sourceId);
+  for (const [index, text] of ['Distinct spelling.\n', 'Original spelling.\n'].entries()) {
+    const sourceId = sources[index].sourceId;
+    assert.equal((await client.call('read_source', { projectId: 'alpha', sourceId })).text, text);
+  }
+  const sourceId = Buffer.from(JSON.stringify(['alpha', 'notes', 'junction/outside.md'])).toString('base64url');
+  assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId }), { error: 'source_unavailable' });
 });

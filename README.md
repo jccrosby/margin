@@ -2,6 +2,7 @@
 
 Margin lets Codex search and read your local project files. It works with Git checkouts and optional folders of notes. It can also save private project notes when you enable saves.
 
+- [Install and use Margin on Windows](docs/windows.md)
 - [Search, refresh, and add sources](docs/usage.md)
 - [Update or remove Margin](docs/manage-margin.md)
 
