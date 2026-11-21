@@ -12,7 +12,7 @@ import { maxBytes, readText } from './read.ts';
 import { checkOutsideRoots, MarginError, registryLocation, unsafeStorage, type Project, type Root } from './registry.ts';
 import { requirePrivateAccess } from './macos.ts';
 import { isMissing, readPrivateFile, requirePrivateDirectory } from './storage.ts';
-import { readLiveSource, savedNotesId, scanPaths, sourceId, withInventory } from './sources.ts';
+import { readLiveSource, savedNotesId, scanPaths, sourceId, withInventory, type SourceReader } from './sources.ts';
 
 type IndexRoot = Root | { id: typeof linksId; kind: 'links'; path: ''; urls: string[] };
 
@@ -24,7 +24,7 @@ export function indexRoots(project: Project, savedNotes?: Root): IndexRoot[] {
   return roots;
 }
 
-type Gap = { error: string; relativePath?: string };
+type Gap = { error: string; relativePath?: string; detail?: string };
 type Refresh = { status: string; refreshedAt?: string; gaps: Gap[] };
 export type Inventory = Map<string, ReturnType<typeof scanPaths> | { error: string }>;
 type Source = { rootId: string; rootKey: string; relativePath: string; hash: string; text: string };
@@ -128,6 +128,12 @@ function openIndex(path: string, write: boolean) {
     } else {
       readPrivateFile(path, () => undefined);
     }
+  } catch (error) {
+    if (!write && isMissing(error)) return undefined;
+    throw unsafeStorage('index_unavailable', path);
+  }
+
+  try {
     const db = new DatabaseSync(path, { readOnly: !write, timeout: busyTimeout, enableForeignKeyConstraints: true });
     try {
       db.exec('PRAGMA temp_store = MEMORY');
@@ -142,9 +148,8 @@ function openIndex(path: string, write: boolean) {
       db.close();
       throw error;
     }
-  } catch (error) {
-    if (!write && isMissing(error)) return undefined;
-    throw unsafeStorage('index_unavailable', path);
+  } catch {
+    throw new MarginError('index_unavailable');
   }
 }
 
@@ -207,7 +212,7 @@ async function refreshRoot(db: DatabaseSync, root: IndexRoot, scratchParent: str
 }
 
 function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: ReturnType<typeof scanPaths>,
-  read: <T>(path: string, use: (fd: number) => T) => T, scratchParent: string) {
+  read: SourceReader, scratchParent: string) {
   const old = db.prepare('SELECT id, rootKey, relativePath, hash FROM sources WHERE rootId = ?').all(root.id);
   const retained = new Set([...inventory.paths, ...inventory.unreadable]);
   const previous = new Map(old.filter(row => row.rootKey === key).map(row => [row.relativePath, row]));
@@ -235,7 +240,7 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
       let evidence = entry?.hash === digest ? storedEvidence(db, root.id, key, relativePath)?.evidence : undefined;
       if (evidence && !evidence.errors.length) continue;
       evidence = extractEvidence(bytes, relativePath, scratchParent);
-      for (const error of evidence.errors) gaps.push({ error, relativePath });
+      for (const error of evidence.errors) gaps.push({ error, relativePath, detail: evidence.failureDetails?.[error] });
       if (entry) removeSource.run(entry.id);
       saveEvidence(db, root.id, key, relativePath, digest, evidence);
       continue;
@@ -299,7 +304,9 @@ async function getLinks(urls: string[], scratchParent: string) {
     try {
       const fetched = await fetchEvidence(url, urls, scratchParent);
       successes.set(url, fetched);
-      for (const error of fetched.evidence.errors) gaps.push({ error, relativePath: url });
+      for (const error of fetched.evidence.errors) {
+        gaps.push({ error, relativePath: url, detail: fetched.evidence.failureDetails?.[error] });
+      }
     } catch (cause) {
       gaps.push({ error: cause instanceof MarginError ? cause.message : 'fetch_failed', relativePath: url });
     }
@@ -350,18 +357,18 @@ export function liveInventory(roots: IndexRoot[]): Inventory {
 type Coverage = ReturnType<typeof collectCoverage>;
 
 function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inventory: Inventory,
-  indexUnavailable = false
+  indexProblem?: Gap
 ) {
   const coverage = roots.map(root => {
     const key = rootKey(root);
     const { status, refreshedAt, gaps } = getRefresh(db, key);
     const live = inventory.get(root.id)!;
     const savedNotes = root.id === savedNotesId;
-    if (indexUnavailable) gaps.push({ error: 'index_unavailable' });
+    if (indexProblem) gaps.push(indexProblem);
     if ('error' in live) gaps.push(live);
     else {
       for (const relativePath of live.unreadable) gaps.push({ error: 'source_unavailable', relativePath });
-      if (!indexUnavailable && (savedNotes || (db && status !== 'not_refreshed'))) {
+      if (!indexProblem && (savedNotes || (db && status !== 'not_refreshed'))) {
         const indexed = new Set(db?.prepare('SELECT relativePath FROM sources WHERE rootKey = ?')
           .all(key).map(row => row.relativePath as string));
         const failed = new Set(gaps.map(gap => gap.relativePath));
@@ -403,9 +410,13 @@ export function indexCoverage(registryPath: string, projectId: string, roots: In
   allRoots: Root[], inventory: Inventory) {
   try {
     return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory));
-  } catch {
-    return collectCoverage(undefined, roots, inventory, true);
+  } catch (error) {
+    return collectCoverage(undefined, roots, inventory, indexGap(error));
   }
+}
+
+function indexGap(cause: unknown): Gap {
+  return { error: 'index_unavailable', detail: cause instanceof MarginError ? cause.detail : undefined };
 }
 
 function storedEvidence(db: DatabaseSync | undefined, rootId: string, key: string, relativePath: string) {
@@ -451,7 +462,7 @@ export function openEvidence(registryPath: string, projectId: string, root: Inde
       item = selectEvidence(evidence, location, item => item.text !== undefined);
     }
     return { data: { ...source, contentHash, ...evidence.retrieval, failures: evidence.errors,
-      ...(item ?? { kind: 'link', location: {} }) } };
+      failureDetails: evidence.failureDetails, ...(item ?? { kind: 'link', location: {} }) } };
   }
   if (!format) {
     if (!requestedHash || !location || !('startLine' in location)) throw new MarginError('evidence_unavailable');
@@ -466,16 +477,18 @@ export function openEvidence(registryPath: string, projectId: string, root: Inde
   const media = format === 'image' || (format === 'video' && (atSeconds !== undefined ||
     (location && 'timestampSeconds' in location)));
   let indexed;
-  const failures = [];
+  let indexFailure;
   try {
     indexed = lookup();
   } catch (error) {
     if (!media || !(error instanceof MarginError) || error.message !== 'index_unavailable') throw error;
-    failures.push(error.message);
+    indexFailure = error;
   }
   const evidence = indexed?.contentHash === contentHash ? indexed.evidence : undefined;
   const base = {
-    ...source, contentHash, failures: evidence?.errors ?? failures
+    ...source, contentHash, failures: evidence?.errors ?? (indexFailure ? [indexFailure.message] : []),
+    failureDetails: evidence?.failureDetails ??
+      (indexFailure?.detail ? { [indexFailure.message]: indexFailure.detail } : undefined)
   };
   if (format === 'image' && (!location || ('image' in location && !('item' in location)))) {
     return { data: { ...base, kind: 'image', location: { image: 1 } }, image: originalImage(bytes, relativePath) };
@@ -629,7 +642,7 @@ export function searchProject(registryPath: string, projectId: string, roots: In
     if (error instanceof MarginError && error.message !== 'index_unavailable') throw error;
     const notes = inventory.get(savedNotesId);
     if (!notes || !('paths' in notes) || !notes.paths.length) throw error;
-    return { hits: [], coverage: collectCoverage(undefined, roots, inventory, true) };
+    return { hits: [], coverage: collectCoverage(undefined, roots, inventory, indexGap(error)) };
   }
 }
 

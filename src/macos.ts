@@ -8,7 +8,7 @@ const native = require(fileURLToPath(new URL('../dist/macos.node', import.meta.u
   openDirectory(path: string): number;
   openEntry(directory: number, path: string, isDirectory: boolean, exact: boolean): number;
   entries(directory: number): [Buffer, 'directory' | 'file'][] | number;
-  privateAccess(fd: number, ancestor: boolean): boolean;
+  privateAccess(fd: number, ancestor: boolean): boolean | number;
   entryPath(fd: number): string | number;
   changeDirectory(fd: number): number;
   publish(from: string, to: string): number;
@@ -53,7 +53,7 @@ export function entryPath(fd: number) {
 }
 
 export function requirePrivateAccess(fd: number, ancestor = false) {
-  if (!native.privateAccess(fd, ancestor)) throw new Error('Unsafe permissions, ownership, or ACL.');
+  if (native.privateAccess(fd, ancestor) !== true) throw new Error('Unsafe permissions, ownership, or ACL.');
 }
 
 export function publishExclusive(from: string, to: string) {

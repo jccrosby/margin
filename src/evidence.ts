@@ -42,8 +42,17 @@ export type EvidenceItem = {
 };
 
 export type Evidence = {
-  items: EvidenceItem[]; errors: string[]; retrieval?: Retrieval; approvalsUsed?: string[]; lineBased?: true
+  items: EvidenceItem[]; errors: string[]; failureDetails?: Record<string, string>;
+  retrieval?: Retrieval; approvalsUsed?: string[]; lineBased?: true
 };
+export function recordExtractionError(evidence: Evidence, cause: unknown) {
+  const code = cause instanceof MarginError ? cause.message : 'extraction_failed';
+  evidence.errors.push(code);
+  if (cause instanceof MarginError && cause.detail) {
+    evidence.failureDetails = { ...evidence.failureDetails, [code]: cause.detail };
+  }
+}
+
 export type Retrieval = { approvedUrl: string; finalUrl: string; retrievedAt: string };
 export type ImageBlock = { type: 'image'; mimeType: string; data: string };
 
@@ -198,6 +207,7 @@ export function extractEvidence(bytes: Buffer, path: string, scratchParent: stri
   const extension = extname(path).toLowerCase();
   const items: EvidenceItem[] = format === 'image' ? [{ kind: 'image', location: { image: 1 } }] : [];
   const errors: string[] = [];
+  const evidence: Evidence = { items, errors };
   try {
     const extracted = format === 'video' ? transcript(bytes, extension, scratchParent) : extractDocument(bytes, extension, errors, scratchParent);
     if (!extracted.length && !errors.length) {
@@ -208,9 +218,9 @@ export function extractEvidence(bytes: Buffer, path: string, scratchParent: stri
       else if (!errors.includes('evidence_too_large')) errors.push('evidence_too_large');
     }
   } catch (error) {
-    errors.push(error instanceof MarginError ? error.message : 'extraction_failed');
+    recordExtractionError(evidence, error);
   }
-  return { items, errors };
+  return evidence;
 }
 
 export function imageBlock(bytes: Buffer, mimeType: string): ImageBlock {

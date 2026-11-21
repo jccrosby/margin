@@ -144,9 +144,10 @@ function useEntry<T>(root: Root, fd: number, relativePath: string, use: (fd: num
 }
 
 type SourceInventory = { paths: string[]; unreadable: string[] };
+export type SourceReader = <T>(path: string, use: (fd: number) => T) => T;
 
 export function withInventory<T>(root: Root,
-  use: (inventory: SourceInventory, read: <R>(path: string, use: (fd: number) => R) => R) => T
+  use: (inventory: SourceInventory, read: SourceReader) => T
 ) {
   return withRoot(root, fd => {
     function scan(): SourceInventory {

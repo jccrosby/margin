@@ -68,6 +68,10 @@ export function loadRegistry(path: string) {
 }
 
 export function registryLocation(path: string) {
+  if (path.split(sep).includes('..')) {
+    throw new MarginError('registry_unavailable',
+      `Check ${JSON.stringify(path)}. Use an absolute registry path without '..' segments.`);
+  }
   try {
     if (!isAbsolute(path) || !path.isWellFormed()) throw new Error('Invalid registry path.');
     const normalized = normalize(path);
@@ -103,7 +107,7 @@ function lstatOrMissing(path: string) {
   try {
     return lstatSync(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!isMissing(error)) throw error;
   }
 }
 

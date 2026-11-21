@@ -1,4 +1,4 @@
-import { contentHash, extractDocument, type Evidence, type EvidenceItem } from './evidence.ts';
+import { contentHash, extractDocument, recordExtractionError, type Evidence, type EvidenceItem } from './evidence.ts';
 import { rankedPassages, textLines } from './passages.ts';
 import { maxBytes } from './read.ts';
 import { approvedHttpsUrl, MarginError } from './registry.ts';
@@ -55,7 +55,7 @@ export async function fetchEvidence(approvedUrl: string, approvals: string[], sc
       if (sourceText !== undefined) evidence.lineBased = true;
       if (!evidence.items.length && !evidence.errors.length) evidence.errors.push('no_extractable_text');
     } catch (error) {
-      evidence.errors.push(error instanceof MarginError ? error.message : 'extraction_failed');
+      recordExtractionError(evidence, error);
     }
     return { digest: contentHash(bytes), evidence, sourceText };
   }

@@ -22,7 +22,9 @@ If you use pnpm, replace `npx --yes` with `pnpm dlx --` in the Codex command.
 
 ## Update a source checkout
 
-Update your Margin checkout to the Git revision you want to run. From that checkout, run `pnpm install --frozen-lockfile` to install its dependencies. Start a new Codex session and repeat the search check. If the checkout moved, [connect Codex again](../README.md#run-margin-from-a-checkout) from the new path.
+Update your checkout to the Git revision you want to run. See the [checkout setup](../README.md#run-margin-from-a-checkout) for the Xcode Command Line Tools. From the checkout, run `pnpm install --frozen-lockfile`, then run `pnpm run build`.
+
+Start a new Codex session and repeat the search check. If the checkout moved, [connect Codex again](../README.md#run-margin-from-a-checkout) from the new path.
 
 ## Rebuild a project's search index
 

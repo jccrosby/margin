@@ -601,7 +601,7 @@ test('opens a versioned physical PDF page and reports a saved citation stale aft
   assert.deepEqual((await client.call('search_project', { projectId: 'demo', query: 'maple owls' })).hits, []);
 });
 
-function fixtureDocling(work, document) {
+function fixtureDocling(work, document, mode) {
   const bin = join(work, 'bin');
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, 'docling'), `#!${process.execPath}
@@ -610,7 +610,9 @@ const path = require('node:path');
 const args = process.argv.slice(2);
 const directory = args[args.indexOf('--output') + 1];
 const filename = path.parse(args.at(-1)).name;
-fs.writeFileSync(path.join(directory, filename + '.json'), ${JSON.stringify(JSON.stringify(document))});
+const output = path.join(directory, filename + '.json');
+fs.writeFileSync(output, ${JSON.stringify(JSON.stringify(document))});
+${mode === undefined ? '' : `fs.chmodSync(output, ${mode});`}
 `, { mode: 0o700 });
   return { ...process.env, PATH: `${bin}:${process.env.PATH}` };
 }
@@ -1258,6 +1260,7 @@ test('a matching save retry restores search for a committed note', { timeout: 10
   const { status, noteId } = pending.structuredContent;
   assert.equal(status, 'saved_search_pending');
   assert.ok(noteId);
+  assert.equal(pending.structuredContent.detail, undefined);
   await writer.stop();
 
   const reader = await connect(t, fixture);
@@ -1298,18 +1301,23 @@ test('unsafe saved note storage leaves ordinary sources discoverable', { timeout
   const { noteId } = await client.call('save_project_note',
     { projectId: 'alpha', requestId: 'hidden', title: 'Private handoff', body: 'Find sharedmarker in this note.' });
   assert.ok(noteId);
-  chmodSync(join(dirname(fixture.registry), '.margin-saved-notes'), 0o755);
+  const noteDirectory = join(dirname(fixture.registry), '.margin-saved-notes');
+  chmodSync(noteDirectory, 0o755);
 
   const listing = await client.call('list_sources', { projectId: 'alpha' });
   assert.deepEqual(listing.sources?.map(source => source.relativePath), ['ordinary.md'], JSON.stringify(listing));
-  assert.deepEqual(listing.warnings, [{ rootId: '@saved-notes', error: 'root_unavailable' }]);
+  const [warning] = listing.warnings;
+  assert.equal(warning.rootId, '@saved-notes');
+  assert.equal(warning.error, 'root_unavailable');
+  assert.ok(warning.detail?.includes(noteDirectory));
+  assert.match(warning.detail, /0700/);
   assert.equal(listing.coverage.complete, false);
   for (const mode of ['ranked', 'literal']) {
     const result = await client.call('search_project', { projectId: 'alpha', query: 'sharedmarker', mode });
     assert.deepEqual(result.hits.map(hit => hit.relativePath), ['ordinary.md']);
     assert.equal(result.coverage.complete, false);
     assert.deepEqual(result.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
-      [{ error: 'root_unavailable' }]);
+      [{ error: 'root_unavailable', detail: warning.detail }]);
   }
   const unavailable = await client.call('read_source', { projectId: 'alpha', sourceId: noteId });
   assert.equal(unavailable.error, 'note_storage_unavailable');
@@ -1361,8 +1369,15 @@ test('a saved note stays private and discoverable when its index is unavailable'
     const search = await client.call('search_project', { projectId: 'alpha', query: 'Protect' });
     assert.deepEqual(search.hits, []);
     assert.equal(search.coverage.complete, false);
-    assert.deepEqual(search.coverage.roots.find(root => root.rootId === '@saved-notes').gaps,
-      [{ error: 'index_unavailable' }]);
+    const savedNoteCoverage = coverage => coverage.roots.find(root => root.rootId === '@saved-notes');
+    const [gap] = savedNoteCoverage(search.coverage).gaps;
+    assert.equal(gap.error, 'index_unavailable');
+    assert.ok(gap.detail?.includes(join(directory, index)));
+    assert.match(gap.detail, /0600/);
+    assert.equal(response.detail, gap.detail);
+    const listing = await client.call('list_sources', { projectId: 'alpha' });
+    assert.ok(listing.sources.some(source => source.sourceId === response.noteId));
+    assert.deepEqual(savedNoteCoverage(listing.coverage).gaps, [gap]);
     const refresh = spawnSync(process.execPath, [entry, '--registry', fixture.registry, 'refresh', 'alpha'],
       { cwd: fixture.work, encoding: 'utf8' });
     assert.equal(refresh.status, 1);
@@ -1499,4 +1514,48 @@ test('an ACL on a SQLite sidecar blocks access before SQLite opens it', t => {
   assert.match(refresh.stderr, /index_unavailable/);
   assert.ok(refresh.stderr.includes(path));
   assert.equal(readFileSync(path, 'utf8'), 'unsafe sidecar fixture');
+});
+
+
+test('a registry path with a parent segment never selects another registry', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  const before = readFileSync(fixture.registry);
+  const prefix = join(fixture.work, 'linked directory');
+  symlinkSync(fixture.checkout, prefix);
+  const ambiguous = { ...fixture, registry: `${prefix}/../private/projects.json` };
+  const register = runWithEnv(ambiguous, process.env, 'register', 'beta', fixture.checkout);
+  assert.equal(register.status, 1);
+  assert.ok(register.stderr.includes(ambiguous.registry));
+  assert.ok(register.stderr.includes("without '..'"));
+  assert.deepEqual(readFileSync(fixture.registry), before);
+
+  const client = await connect(t, ambiguous);
+  const listing = await client.call('list_projects');
+  assert.equal(listing.error, 'registry_unavailable');
+  assert.ok(listing.detail?.includes(ambiguous.registry));
+});
+
+test('unsafe extractor output reports its location and keeps other sources searchable', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  writeFileSync(join(fixture.checkout, 'evidence.pdf'), 'PDF fixture');
+  writeFileSync(join(fixture.checkout, 'ordinary.md'), 'ordinarymarker');
+  fixture.cli('register', 'alpha', fixture.checkout);
+  const env = fixtureDocling(fixture.work, { texts: [] }, 0o644);
+  const refresh = runWithEnv(fixture, env, 'refresh', 'alpha');
+  assert.equal(refresh.status, 1);
+  const { roots: [{ gaps: [gap] }] } = JSON.parse(refresh.stdout);
+  assert.equal(gap.error, 'evidence_storage_unavailable');
+  assert.equal(gap.relativePath, 'evidence.pdf');
+  assert.ok(gap.detail?.includes(dirname(fixture.registry)));
+  assert.match(gap.detail, /source\.json.*0600/);
+
+  const client = await connect(t, fixture);
+  const { sources } = await client.call('list_sources', { projectId: 'alpha' });
+  const { sourceId } = sources.find(source => source.relativePath === 'evidence.pdf');
+  const evidence = await client.call('open_evidence', { projectId: 'alpha', sourceId });
+  assert.deepEqual(evidence.failures, ['evidence_storage_unavailable']);
+  assert.equal(evidence.failureDetails?.evidence_storage_unavailable, gap.detail);
+  const search = await client.call('search_project', { projectId: 'alpha', query: 'ordinarymarker' });
+  assert.deepEqual(search.hits.map(hit => hit.relativePath), ['ordinary.md']);
 });
