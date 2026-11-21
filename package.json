@@ -4,18 +4,19 @@
   "packageManager": "pnpm@12.18.0",
   "type": "module",
   "bin": {"margin": "dist/margin.js"},
-  "files": ["dist/*.js"],
+  "files": ["dist/*.js", "dist/macos.node"],
   "os": ["darwin"],
+  "cpu": ["arm64"],
   "engines": {"node": ">=26 <27"},
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node scripts/build-native.js",
     "prepack": "pnpm run build",
     "release:bootstrap": "bash scripts/bootstrap-release.sh",
     "release:verify": "bash scripts/verify-release.sh",
-    "test": "node --test",
+    "test": "node scripts/build-native.js && node --test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

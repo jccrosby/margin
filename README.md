@@ -7,7 +7,7 @@ Margin lets Codex search and read your local project files. It works with Git ch
 
 ## Get access to Margin
 
-You need macOS, Node.js 26, Git, and the Codex CLI. The examples use `npx`, which comes with npm.
+You need macOS 26 on Apple silicon, local APFS storage, Node.js 26, Git, and the Codex CLI. The examples use `npx`, which comes with npm.
 
 The **package** is the downloadable copy of the Margin program. GitHub Packages hosts it at `https://npm.pkg.github.com`. Its name is `@jccrosby/margin`.
 
@@ -49,7 +49,7 @@ npx --yes @jccrosby/margin@0.1.0 \
   register demo "/absolute/path/to/checkout"
 ```
 
-`npx` downloads the requested version if needed and runs it. Margin creates `projects.json` on the first registration. Keep that file outside every folder you register.
+`npx` downloads the requested version if needed and runs it. Margin creates `projects.json` on the first registration. Keep it in a private directory outside every registered folder.
 
 To include notes, append the full path to an existing notes folder after the checkout path. Use your chosen project ID in every command that shows `demo`.
 
@@ -93,10 +93,11 @@ git clone https://github.com/jccrosby/margin.git
 cd margin
 ```
 
-If you already have a Margin checkout, open it in your terminal. Install the dependencies with pnpm 12.18.0.
+If you already have a Margin checkout, open it in your terminal. Install the Xcode Command Line Tools for the native build. Then use pnpm 12.18.0 to install and build Margin.
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm run build
 ```
 
 Run these commands from the Margin checkout. Replace the example checkout path with the full path to the project you want to search. You can append a notes folder path after it.
@@ -126,7 +127,7 @@ pnpm run typecheck
 ```
 
 The tests launch the stdio server in a separate directory with synthetic Git and notes fixtures.
-After installing, you can run `node src/margin.ts` from the checkout with the same arguments.
+After the tests compile the native addon, you can run `node src/margin.ts` with the same arguments.
 
 The Step 1 check used a fresh Codex CLI 0.167.0 session. Codex read bounded passages from both roots and rejected path escapes and foreign source IDs.
 
