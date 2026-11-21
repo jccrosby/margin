@@ -26,7 +26,7 @@ export function indexRoots(project: Project, savedNotes?: Root): IndexRoot[] {
 
 type Gap = { error: string; relativePath?: string; detail?: string };
 type Refresh = { status: string; refreshedAt?: string; gaps: Gap[] };
-export type Inventory = Map<string, ReturnType<typeof scanPaths> | { error: string }>;
+export type Inventory = Map<string, ReturnType<typeof scanPaths> | Pick<Gap, 'error' | 'detail'>>;
 type Source = { rootId: string; rootKey: string; relativePath: string; hash: string; text: string };
 type Passage = { startLine: number; endLine: number; text: string };
 type Ranked = Omit<Source, 'text'> & Passage;
@@ -199,7 +199,7 @@ async function refreshRoot(db: DatabaseSync, root: IndexRoot, scratchParent: str
             throw error;
           }
           db.prepare("UPDATE refreshes SET status = 'failed', gaps = ? WHERE rootKey = ?")
-            .run(JSON.stringify([{ error: error.message }]), key);
+            .run(JSON.stringify([{ error: error.message, detail: error.detail }]), key);
         }
       }
     }
@@ -214,9 +214,9 @@ async function refreshRoot(db: DatabaseSync, root: IndexRoot, scratchParent: str
 function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: ReturnType<typeof scanPaths>,
   read: SourceReader, scratchParent: string) {
   const old = db.prepare('SELECT id, rootKey, relativePath, hash FROM sources WHERE rootId = ?').all(root.id);
-  const retained = new Set([...inventory.paths, ...inventory.unreadable]);
+  const retained = new Set([...inventory.paths, ...inventory.unreadable.map(gap => gap.relativePath)]);
   const previous = new Map(old.filter(row => row.rootKey === key).map(row => [row.relativePath, row]));
-  const gaps: Gap[] = inventory.unreadable.map(relativePath => ({ error: 'source_unavailable', relativePath }));
+  const gaps: Gap[] = [...inventory.unreadable];
   const removeSource = db.prepare('DELETE FROM sources WHERE id = ?');
   const publishText = textPublisher(db, root.id, key);
   for (const entry of old) {
@@ -230,7 +230,11 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
       if (format) bytes = read(relativePath, readEvidenceBytes);
       else text = read(relativePath, readText);
     } catch (cause) {
-      gaps.push({ error: cause instanceof MarginError ? cause.message : 'source_unavailable', relativePath });
+      gaps.push({
+        error: cause instanceof MarginError ? cause.message : 'source_unavailable',
+        detail: cause instanceof MarginError ? cause.detail : undefined,
+        relativePath
+      });
       continue;
     }
 
@@ -290,7 +294,8 @@ export function indexSavedNote(registryPath: string, projectId: string, allRoots
     db.prepare("INSERT OR IGNORE INTO refreshes VALUES (?, ?, '', 'complete', NULL, '[]')").run(key, root.id);
     publishStatus(db, key, gaps);
     db.exec('COMMIT');
-  } catch {
+  } catch (error) {
+    if (error instanceof MarginError && error.detail) throw error;
     throw new MarginError('index_unavailable');
   } finally {
     db.close();
@@ -348,7 +353,7 @@ export function liveInventory(roots: IndexRoot[]): Inventory {
       inventory.set(root.id, root.kind === 'links' ? { paths: root.urls, unreadable: [] } : scanPaths(root));
     } catch (error) {
       if (!(error instanceof MarginError)) throw error;
-      inventory.set(root.id, { error: error.message });
+      inventory.set(root.id, { error: error.message, detail: error.detail });
     }
   }
   return inventory;
@@ -367,13 +372,13 @@ function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inven
     if (indexProblem) gaps.push(indexProblem);
     if ('error' in live) gaps.push(live);
     else {
-      for (const relativePath of live.unreadable) gaps.push({ error: 'source_unavailable', relativePath });
+      for (const gap of live.unreadable) gaps.push(gap);
       if (!indexProblem && (savedNotes || (db && status !== 'not_refreshed'))) {
         const indexed = new Set(db?.prepare('SELECT relativePath FROM sources WHERE rootKey = ?')
           .all(key).map(row => row.relativePath as string));
         const failed = new Set(gaps.map(gap => gap.relativePath));
         const added = live.paths.filter(path => !indexed.delete(path) && (root.kind !== 'links' || !failed.has(path)));
-        for (const path of live.unreadable) indexed.delete(path);
+        for (const { relativePath } of live.unreadable) indexed.delete(relativePath);
         if (savedNotes) {
           for (const relativePath of added) gaps.push({ error: 'source_not_indexed', relativePath });
         }
@@ -647,16 +652,19 @@ export function searchProject(registryPath: string, projectId: string, roots: In
 }
 
 function verify(root: Root, relativePath: string, expected: string, coverage: Coverage) {
-  let error: string;
+  let gap: Gap = { error: 'source_changed', relativePath };
   try {
     const content = readLiveSource(root, relativePath, fd => evidenceFormat(relativePath)
       ? readEvidenceBytes(fd) : readText(fd));
     if (hash(content) === expected) return true;
-    error = 'source_changed';
   } catch (cause) {
-    error = cause instanceof MarginError ? cause.message : 'source_unavailable';
+    gap = {
+      error: cause instanceof MarginError ? cause.message : 'source_unavailable',
+      detail: cause instanceof MarginError ? cause.detail : undefined,
+      relativePath
+    };
   }
-  recordGap(coverage, root.id, { error, relativePath });
+  recordGap(coverage, root.id, gap);
   return false;
 }
 

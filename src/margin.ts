@@ -118,7 +118,7 @@ async function serve(registryPath: string) {
     const { roots, notesUnavailable } = discoveryRoots(registryPath, projectId, project, allRoots);
     const inventory = liveInventory(roots);
     for (const [rootId, live] of inventory) {
-      if ('error' in live) warnings.push({ rootId, error: live.error });
+      if ('error' in live) warnings.push({ rootId, ...live });
       else {
         for (const relativePath of live.paths) {
           sources.push({ sourceId: sourceId(projectId, rootId, relativePath), rootId, relativePath });
