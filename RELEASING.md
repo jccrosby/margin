@@ -70,7 +70,7 @@ The check installs the archive outside the checkout. It starts the installed CLI
 
 ## Check an Ubuntu candidate
 
-Run these commands on Ubuntu 24.04 LTS x64. Use local ext4, native Node.js 26, Git, and the `build-essential` and `acl` packages.
+Run these commands on Ubuntu 24.04 LTS x64. Use local ext4, native Node.js 26, Git, and the Codex CLI. Install `build-essential` and `acl`.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -79,6 +79,7 @@ pnpm test
 tarball="$(mktemp -d)/margin.tgz"
 pnpm pack --out "$tarball"
 node scripts/check-package.js "$tarball" --candidate
+node scripts/check-codex.js "$tarball"
 ```
 
 Set `MARGIN_TEST_BIND_MOUNTS=1` to include the bind mount test if your account can run `sudo -n mount` and `sudo -n umount`.

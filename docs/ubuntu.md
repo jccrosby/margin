@@ -29,10 +29,10 @@ Margin creates directories with mode `0700` and files with mode `0600`. If Margi
 
 ## Connect Codex
 
-Use the same launcher and registry from the Bash commands above.
+Use the same launcher and registry. Start npm in your home directory so it reads your user settings.
 
 ```bash
-codex mcp add margin -- "${margin[@]}" serve
+codex mcp add margin -- /usr/bin/env -C "$HOME" "${margin[@]}" serve
 codex mcp get margin
 ```
 

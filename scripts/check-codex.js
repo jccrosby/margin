@@ -22,6 +22,7 @@ try {
   writeFileSync(source, text);
   writeFileSync(join(extraCheckout, 'extra.md'), 'This is a supplemental checkout.\n');
   writeFileSync(join(otherCheckout, 'other.md'), text);
+  writeFileSync(join(checkout, '.npmrc'), 'registry=http://127.0.0.1:9/\nfetch-retries=0\n');
 
   const env = { ...process.env, npm_config_cache: join(work, 'npm-cache') };
   const args = ['--yes', '--package', tarball, '--', 'margin', '--registry', registry];
@@ -32,13 +33,14 @@ try {
   margin('register', 'private', otherCheckout);
   margin('refresh', 'private');
 
+  const launch = ['-C', work, 'npx', ...args, 'serve'];
   const settings = [
-    `mcp_servers={margin={command="npx", args=${JSON.stringify([...args, 'serve'])}, ` +
-      `env={npm_config_cache=${JSON.stringify(env.npm_config_cache)}}}}`,
+    `mcp_servers={margin={command="/usr/bin/env", args=${JSON.stringify(launch)}, ` +
+      `env={npm_config_cache=${JSON.stringify(join(work, 'codex-npm-cache'))}}}}`,
     `sqlite_home=${JSON.stringify(work)}`
   ].flatMap(setting => ['-c', setting]);
   const child = spawn(process.argv[3] ?? 'codex', ['app-server', ...settings], {
-    cwd: work, env, stdio: ['pipe', 'pipe', 'inherit'], signal: AbortSignal.timeout(45_000)
+    cwd: checkout, env, stdio: ['pipe', 'pipe', 'inherit'], signal: AbortSignal.timeout(45_000)
   });
   const exited = once(child, 'close');
   void exited.catch(() => {});
@@ -62,7 +64,7 @@ try {
   try {
     await request('initialize', { clientInfo: { name: 'margin-package-check', version: '1' } });
     send({ jsonrpc: '2.0', method: 'initialized' });
-    const { thread } = await request('thread/start', { cwd: work, ephemeral: true });
+    const { thread } = await request('thread/start', { cwd: checkout, ephemeral: true });
     const call = async (tool, args, error) => {
       const reply = await request('mcpServer/tool/call', { threadId: thread.id, server: 'margin', tool, arguments: args });
       assert.equal(Boolean(reply.isError), Boolean(error), JSON.stringify(reply));

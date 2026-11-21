@@ -103,6 +103,17 @@ async function connect(t, { work, registry, env = process.env, nodeArgs = [] }) 
   };
 }
 
+test('the CLI reports the supported platforms when Node uses another architecture', t => {
+  const fixture = setup(t);
+  const unsupported = process.arch === 'arm64' ? 'x64' : 'arm64';
+  const spoof = `Object.defineProperty(process, 'arch', { value: '${unsupported}' });`;
+  const result = spawnSync(process.execPath,
+    ['--import', `data:text/javascript,${encodeURIComponent(spoof)}`, entry, '--registry', fixture.registry, 'serve'],
+    { cwd: fixture.work, encoding: 'utf8', timeout: commandTimeout });
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /Run Margin on macOS ARM64, Windows x64, or Ubuntu x64/);
+});
+
 test('the CLI registers roots and the MCP server lists projects with live cursors', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   fixture.cli('register', 'zeta', fixture.checkout, fixture.notes);
