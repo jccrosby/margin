@@ -10,7 +10,7 @@ permissions:
 jobs:
   windows:
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -20,6 +20,21 @@ jobs:
           node-version: '26'
           package-manager-cache: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install FFmpeg
+        run: choco install ffmpeg --no-progress -y
+      - name: Install Docling and download models
+        run: |
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install 'docling[rapidocr]==2.151.1'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $models = Join-Path $env:RUNNER_TEMP 'docling-models'
+          docling-tools models download layout tableformer rapidocr --output-dir $models
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "DOCLING_ARTIFACTS_PATH=$models" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - name: Check installed package over stdio
@@ -28,6 +43,18 @@ jobs:
           pnpm pack --out $tarball
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check-package.js $tarball --candidate
+      - name: Open HTTPS and media evidence in a fresh Codex thread
+        env:
+          MARGIN_TEST_EXTRACTORS: '1'
+        run: |
+          $codex = Join-Path $env:RUNNER_TEMP 'codex'
+          npm install --prefix $codex --ignore-scripts --no-save '@openai/codex@0.171.0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tarball = Join-Path $env:RUNNER_TEMP 'margin.tgz'
+          $entry = Join-Path $codex 'node_modules/@openai/codex/bin/codex.js'
+          node scripts/check-codex.js $tarball $entry
       - name: Run CLI and MCP tests
-        timeout-minutes: 5
+        timeout-minutes: 8
+        env:
+          MARGIN_TEST_EXTRACTORS: '1'
         run: node --test --test-reporter=tap

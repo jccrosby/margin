@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -655,9 +655,9 @@ ${mode === undefined ? '' : `fs.chmodSync(output, ${mode});`}
   return { ...process.env, PATH: `${bin}:${process.env.PATH}` };
 }
 
-function runWithEnv({ work, registry }, env, ...args) {
+function runWithEnv({ work, registry, timeout = commandTimeout }, env, ...args) {
   const result = spawnSync(process.execPath, [entry, '--registry', registry, ...args], {
-    cwd: work, env, encoding: 'utf8', timeout: commandTimeout, killSignal: 'SIGKILL'
+    cwd: work, env, encoding: 'utf8', timeout, killSignal: 'SIGKILL'
   });
   assert.ifError(result.error);
   return result;
@@ -695,10 +695,12 @@ macTest('distinguishes repeated Word headings in a second Git checkout', { timeo
 test('fetches approved redirects and stops before an unapproved target', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   const requests = join(fixture.work, 'requests.log');
+  const response = join(fixture.work, 'approved.txt');
+  writeFileSync(response, 'A synthetic limit of seven.');
   const shim = join(fixture.work, 'fetch-fixture.mjs');
   const lineText = 'other\n'.repeat(39) + 'boundary-start\nboundary-end\n' + 'x'.repeat(32769) + 'overlong';
   writeFileSync(shim, `
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 globalThis.fetch = async (url, { redirect }) => {
   if (redirect !== 'manual') throw new Error('Fixture requires manual redirects.');
   appendFileSync(${JSON.stringify(requests)}, url + '\\n');
@@ -706,7 +708,7 @@ globalThis.fetch = async (url, { redirect }) => {
   if (path === '/redirect') return Response.redirect('https://example.test/approved');
   if (path === '/blocked') return Response.redirect('https://example.test/private');
   if (path === '/lines') return new Response(${JSON.stringify(lineText)}, { headers: { 'content-type': 'text/plain' } });
-  if (path === '/approved') return new Response('A synthetic limit of seven.', {
+  if (path === '/approved') return new Response(readFileSync(${JSON.stringify(response)}), {
     headers: { 'content-type': 'text/plain' }
   });
   throw new Error('Unexpected request.');
@@ -719,7 +721,8 @@ globalThis.fetch = async (url, { redirect }) => {
     fixture.cli('approve-url', 'demo', `https://example.test/${path}`);
   }
   const started = new Date().toISOString();
-  const refresh = runWithEnv(fixture, { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(shim)}` }, 'refresh', 'demo');
+  const env = { ...process.env, NODE_OPTIONS: `--import=${pathToFileURL(shim)}` };
+  const refresh = runWithEnv(fixture, env, 'refresh', 'demo');
   assert.equal(refresh.status, 1, refresh.stderr || refresh.stdout);
   assert.ok(JSON.parse(refresh.stdout).roots.flatMap(root => root.gaps)
     .some(gap => gap.error === 'redirect_not_approved' && gap.relativePath === 'https://example.test/blocked'));
@@ -748,6 +751,75 @@ globalThis.fetch = async (url, { redirect }) => {
   assert.deepEqual(missing.hits, []);
   assert.ok(missing.coverage.roots.flatMap(root => root.gaps).some(gap =>
     gap.error === 'citation_unavailable' && gap.relativePath === 'https://example.test/lines'));
+
+  writeFileSync(response, 'A synthetic limit of eight.');
+  assert.equal(runWithEnv(fixture, env, 'refresh', 'demo').status, 1);
+  assert.deepEqual(await open('demo'), { error: 'stale_citation' });
+  const updated = await client.call('open_evidence', { projectId: 'demo', sourceId });
+  assert.equal(updated.text, 'A synthetic limit of eight.');
+  assert.notEqual(updated.contentHash, contentHash);
+});
+
+test('reports a missing Docling executable when opening a document', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  writeFileSync(join(fixture.notes, 'reference.pdf'), 'synthetic PDF bytes');
+  fixture.cli('register', 'demo', fixture.checkout, fixture.notes);
+  const bin = join(fixture.work, 'empty-bin');
+  mkdirSync(bin);
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === 'PATH') delete env[key];
+  }
+  env.PATH = bin;
+  const refresh = runWithEnv(fixture, env, 'refresh', 'demo');
+  assert.equal(refresh.status, 1, refresh.stderr || refresh.stdout);
+  const gap = JSON.parse(refresh.stdout).roots.flatMap(root => root.gaps).find(gap => gap.relativePath === 'reference.pdf');
+  assert.equal(gap?.error, 'docling_unavailable');
+  assert.match(gap.detail, /Install Docling/);
+  const client = await connect(t, fixture);
+  const { sources } = await client.call('list_sources', { projectId: 'demo' });
+  const { sourceId } = sources.find(source => source.relativePath === 'reference.pdf');
+  const opened = await client.call('open_evidence', { projectId: 'demo', sourceId });
+  assert.deepEqual(opened.failures, ['docling_unavailable']);
+  assert.equal(opened.failureDetails.docling_unavailable, gap.detail);
+});
+
+test('opens real PDF, Word, and image evidence through Docling', {
+  skip: process.env.MARGIN_TEST_EXTRACTORS !== '1',
+  timeout: 300000
+}, async t => {
+  const fixture = setup(t, 'margin evidence é ');
+  const documents = [
+    ['shipping.pdf', 'copper latch', 'extracted_text', { page: 2, item: 2 }],
+    ['dispatch.docx', 'violet stamp', 'extracted_text', { headingPath: ['Dispatch', 'Checklist'], paragraph: 5 }],
+    ['marker.png', 'BLUE', 'ocr', { image: 1, item: 1 }]
+  ];
+  for (const [file] of documents) {
+    copyFileSync(new URL(`./fixtures/evidence/${file}`, import.meta.url), join(fixture.checkout, file));
+  }
+  fixture.cli('register', 'demo', fixture.checkout);
+  const refresh = runWithEnv({ ...fixture, timeout: 270000 }, process.env, 'refresh', 'demo');
+  assert.equal(refresh.status, 0, refresh.stderr || refresh.stdout);
+  assert.deepEqual(readdirSync(fixture.checkout).sort(), ['.git', 'dispatch.docx', 'marker.png', 'shipping.pdf']);
+  assert.equal(readdirSync(dirname(fixture.registry)).some(name => name.startsWith('.margin-evidence-')), false);
+  const client = await connect(t, fixture);
+  for (const [file, query, kind, location] of documents) {
+    const { hits } = await client.call('search_project', { projectId: 'demo', query, mode: 'literal' });
+    assert.equal(hits.length, 1, `${file}: ${JSON.stringify(hits)}`);
+    const [hit] = hits;
+    assert.deepEqual([hit.relativePath, hit.kind, hit.location], [file, kind, location]);
+    const { sourceId, contentHash } = hit;
+    const citation = { projectId: 'demo', sourceId, contentHash, location };
+    assert.equal((await client.call('open_evidence', citation)).text, hit.text);
+    if (kind === 'ocr') {
+      const { content } = await client.callResult('open_evidence', { projectId: 'demo', sourceId });
+      assert.deepEqual(content[1], {
+        type: 'image', mimeType: 'image/png', data: readFileSync(join(fixture.checkout, file)).toString('base64')
+      });
+    }
+    writeFileSync(join(fixture.checkout, file), 'changed fixture bytes');
+    assert.deepEqual(await client.call('open_evidence', citation), { error: 'stale_citation' });
+  }
 });
 
 macTest('opens the original image when no OCR text can be extracted', { timeout: 10000 }, async t => {
@@ -772,29 +844,31 @@ macTest('opens the original image when no OCR text can be extracted', { timeout:
   assert.deepEqual(JSON.parse(content[0].text).failures, ['ocr_unavailable']);
 });
 
-macTest('opens a timed transcript and reports the actual selected frame timestamp', { timeout: 15000 }, async t => {
+test('opens a timed transcript and reports the actual selected frame timestamp', { timeout: 15000 }, async t => {
   if (['ffmpeg', 'ffprobe'].some(command => spawnSync(command, ['-version']).error?.code === 'ENOENT')) {
+    assert.notEqual(process.env.MARGIN_TEST_EXTRACTORS, '1', 'Install FFmpeg and ffprobe.');
     t.skip('FFmpeg is unavailable.');
     return;
   }
   const fixture = setup(t);
-  const subtitles = join(fixture.work, 'speech.srt');
-  writeFileSync(subtitles, '1\n00:00:00,500 --> 00:00:01,800\nUse the blue sign.\n');
-  run(fixture.work, 'ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=red:s=48x48:r=2:d=2',
-    '-i', subtitles, '-c:v', 'mpeg4', '-c:s', 'mov_text', join(fixture.checkout, 'demo.mp4'));
+  copyFileSync(new URL('./fixtures/evidence/demo.mp4', import.meta.url), join(fixture.checkout, 'demo.mp4'));
   fixture.cli('register', 'demo', fixture.checkout);
   fixture.cli('refresh', 'demo');
-  const ffmpeg = run(fixture.work, '/bin/sh', '-c', 'command -v ffmpeg').trim();
-  const bin = join(fixture.work, 'bin');
-  mkdirSync(bin);
-  const noise = '[unrelated @ 0x1] config in time_base: 1/1\n[unrelated @ 0x1] n: 0 pts: 53\n';
-  writeFileSync(join(bin, 'ffmpeg'), `#!${process.execPath}
+  let clientEnv = process.env;
+  if (!windows) {
+    const ffmpeg = run(fixture.work, '/bin/sh', '-c', 'command -v ffmpeg').trim();
+    const bin = join(fixture.work, 'bin');
+    mkdirSync(bin);
+    const noise = '[unrelated @ 0x1] config in time_base: 1/1\n[unrelated @ 0x1] n: 0 pts: 53\n';
+    writeFileSync(join(bin, 'ffmpeg'), `#!${process.execPath}
 const { spawnSync } = require('node:child_process');
 process.stderr.write(${JSON.stringify(noise)});
 const ffmpeg = spawnSync(${JSON.stringify(ffmpeg)}, process.argv.slice(2), { stdio: 'inherit' });
 process.exit(ffmpeg.status ?? 1);
 `, { mode: 0o700 });
-  const client = await connect(t, { ...fixture, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    clientEnv = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` };
+  }
+  const client = await connect(t, { ...fixture, env: clientEnv });
   const { hits: [hit] } = await client.call('search_project', { projectId: 'demo', query: 'blue sign' });
   assert.equal(hit.kind, 'transcript');
   assert.deepEqual(hit.location, { startSeconds: 0.5, endSeconds: 1.8 });
