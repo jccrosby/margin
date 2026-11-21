@@ -1,12 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { closeSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { z } from 'zod';
 
 import { maxBytes, readBytes } from './read.ts';
 import { MarginError, unsafeStorage } from './registry.ts';
-import { requirePrivateAccess } from './filesystem.ts';
+import { createPrivateDirectory, requirePrivateAccess, windows } from './filesystem.ts';
 import { readPrivateFile, requirePrivateDirectory } from './storage.ts';
 
 const formats = new Map<string, 'pdf' | 'docx' | 'image' | 'video'>([
@@ -70,12 +70,16 @@ export function readEvidenceBytes(fd: number) {
 }
 
 function withSnapshot<T>(parent: string, bytes: Buffer, extension: string, use: (directory: string, path: string) => T) {
-  let directory;
+  const directory = join(parent, `.margin-evidence-${randomUUID()}`);
   try {
     requirePrivateDirectory(parent);
-    directory = mkdtempSync(join(parent, '.margin-evidence-'));
   } catch {
     throw unsafeStorage('evidence_storage_unavailable', parent);
+  }
+  try {
+    createPrivateDirectory(directory);
+  } catch {
+    throw unsafeStorage('evidence_storage_unavailable', directory);
   }
   try {
     const path = join(directory, `source${extension}`);
@@ -97,12 +101,23 @@ function withSnapshot<T>(parent: string, bytes: Buffer, extension: string, use: 
   }
 }
 
-function run(directory: string, command: string, args: string[], maxBuffer = maxExtractedBytes) {
-  const result = spawnSync('/bin/sh', ['-c', 'umask 077; exec "$@"', 'margin', command, ...args], {
-    env: { ...process.env, TMPDIR: directory },
-    timeout: commandTimeout, killSignal: 'SIGKILL', maxBuffer, stdio: ['ignore', 'pipe', 'pipe']
+function run(directory: string, command: 'docling' | 'ffmpeg' | 'ffprobe', args: string[]) {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (['TEMP', 'TMP', 'TMPDIR'].includes(key.toUpperCase())) delete env[key];
+  }
+  Object.assign(env, { TEMP: directory, TMP: directory, TMPDIR: directory });
+  const executable = windows ? `${command}.exe` : command;
+  const target = windows ? executable : '/bin/sh';
+  const launchArgs = windows ? args : ['-c', 'umask 077; exec "$@"', 'margin', executable, ...args];
+  const result = spawnSync(target, launchArgs, {
+    cwd: directory, env, windowsHide: true,
+    timeout: commandTimeout, killSignal: 'SIGKILL', maxBuffer: maxExtractedBytes, stdio: ['ignore', 'pipe', 'pipe']
   });
-  if (result.status === 127) throw new MarginError(`${command}_unavailable`);
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' || (!windows && result.status === 127)) {
+    const tool = command === 'docling' ? 'Docling' : 'FFmpeg';
+    throw new MarginError(`${command}_unavailable`, `Install ${tool} and add ${executable} to PATH.`);
+  }
   if (result.error || result.status !== 0) throw new MarginError(`${command}_failed`);
   return { stdout: result.stdout, stderr: result.stderr.toString('utf8') };
 }
@@ -196,7 +211,7 @@ function transcript(bytes: Buffer, extension: string, scratchParent: string): Ev
       '-map', '0:s:0', '-vn', '-an', '-f', 'webvtt', 'pipe:1']);
     const cues = /^((?:\d+:)?\d{2}:\d{2}\.\d{3}) --> ((?:\d+:)?\d{2}:\d{2}\.\d{3})[^\n]*\n((?:[^\n]+\n?)+)/gm;
     const parseTime = (value: string) => value.split(':').reduce((time, part) => time * 60 + Number(part), 0);
-    return Array.from(stdout.toString('utf8').matchAll(cues), ([, start, end, text]) => ({
+    return Array.from(stdout.toString('utf8').replaceAll('\r\n', '\n').matchAll(cues), ([, start, end, text]) => ({
       kind: 'transcript', location: { startSeconds: parseTime(start), endSeconds: parseTime(end) }, text: text.trim()
     }));
   });

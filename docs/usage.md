@@ -51,6 +51,8 @@ Run the command again with the same root ID and a new path to move that checkout
 - For MP4, MOV, MKV, and WebM, install FFmpeg. Make sure the terminal can find `ffmpeg` and `ffprobe` before you refresh. Codex also needs access to `ffmpeg` to request a frame.
 - Margin searches the first embedded timed text track in a video. You can request a frame even if the video has no text track.
 
+On Windows, add the folders for `docling.exe`, `ffmpeg.exe`, and `ffprobe.exe` to `PATH`. Restart PowerShell and Codex after changing `PATH`.
+
 Approve each HTTPS URL before running refresh. Replace the example URL with the page you want Margin to read.
 
 ```sh
