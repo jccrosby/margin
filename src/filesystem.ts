@@ -33,15 +33,16 @@ function check(result: number) {
   return result < 0 ? fail(result) : result;
 }
 
+export function isWindowsPathSegment(part: string) {
+  return !/[\\/:<>"|?*\x00-\x1f]|[. ]$/.test(part) &&
+    !/^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part);
+}
+
 export function isNativeAbsolutePath(path: string) {
   if (!path.isWellFormed() || path.includes('\0')) return false;
   if (!windows) return path.startsWith('/');
   if (!/^[a-z]:[\\/]/i.test(path)) return false;
-  return path.slice(3).split(/[\\/]/).every(part => {
-    if (!part || part === '.' || part === '..') return true;
-    return !/[:<>"|?*\x00-\x1f]|[. ]$/.test(part) &&
-      !/^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part);
-  });
+  return path.slice(3).split(/[\\/]/).every(part => !part || part === '.' || part === '..' || isWindowsPathSegment(part));
 }
 
 export function verifyVolume(path: string) {

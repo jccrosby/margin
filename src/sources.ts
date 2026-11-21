@@ -2,7 +2,7 @@ import { fstatSync } from 'node:fs';
 import { basename, extname, sep } from 'node:path';
 import { evidenceFormat } from './evidence.ts';
 import { git, requireGitCheckout } from './git.ts';
-import { readEntries, requirePrivateAccess, windows, withDirectory, withEntry } from './filesystem.ts';
+import { isWindowsPathSegment, readEntries, requirePrivateAccess, windows, withDirectory, withEntry } from './filesystem.ts';
 import { MarginError, type Root } from './registry.ts';
 
 export const savedNotesDirectory = '.margin-saved-notes';
@@ -37,7 +37,7 @@ export function isNoteCitationPath(relativePath: string) {
 export function isSourcePath(relativePath: string) {
   const segments = relativePath.split('/');
   if (segments.some(segment => !segment || segment === '.' || segment === '..' ||
-      !segment.isWellFormed() || segment.includes('\0') || isExcluded(segment))) return false;
+      !segment.isWellFormed() || segment.includes('\0') || (windows && !isWindowsPathSegment(segment)) || isExcluded(segment))) return false;
   const name = segments.at(-1)!.toLowerCase();
   const extension = extname(name);
   return isNoteCitationPath(name) || extension === '.csv' || extension === '.txt' || name === 'license' ||

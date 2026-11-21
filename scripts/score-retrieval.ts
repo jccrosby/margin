@@ -9,6 +9,7 @@ import { id } from '../src/registry.ts';
 
 const limit = 5;
 const requestTimeoutMs = 30_000;
+const windows = process.platform === 'win32';
 class RequestTimeout extends Error {}
 const line = z.number().int().positive();
 const requiredCitation = z.strictObject({
@@ -33,7 +34,7 @@ const responseSchema = z.object({
 async function score(registry: string, manifest: z.infer<typeof manifestSchema>) {
   const margin = fileURLToPath(new URL('../src/margin.ts', import.meta.url));
   const child = spawn(process.execPath, [margin, '--registry', registry, 'serve'], {
-    stdio: ['pipe', 'pipe', 'ignore'], detached: true
+    stdio: ['pipe', 'pipe', 'ignore'], detached: !windows
   });
   const messages = createInterface({ input: child.stdout });
   child.on('error', () => messages.close());
@@ -83,9 +84,12 @@ async function score(registry: string, manifest: z.infer<typeof manifestSchema>)
     return cases;
   } finally {
     messages.close();
-    if (child.pid !== undefined) {
+    child.stdin.destroy();
+    if (windows) {
+      child.kill('SIGKILL');
+    } else if (child.pid !== undefined) {
       try {
-        // fix: Stop the server and any Git command it launched.
+        // Stop the server and its Git commands together.
         process.kill(-child.pid, 'SIGKILL');
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;

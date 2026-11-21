@@ -14,6 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const windows = process.platform === 'win32';
 const macTest = process.platform === 'darwin' ? test : test.skip;
 const windowsTest = windows ? test : test.skip;
+const commandTimeout = 15_000;
 
 function linkDirectory(target, path) {
   symlinkSync(target, path, windows ? 'junction' : 'dir');
@@ -43,7 +44,7 @@ function setup(t, prefix = 'margin-test-') {
 }
 
 function run(cwd, command, ...args) {
-  const result = spawnSync(command, args, { cwd, encoding: 'utf8' });
+  const result = spawnSync(command, args, { cwd, encoding: 'utf8', timeout: commandTimeout, killSignal: 'SIGKILL' });
   assert.equal(result.status, 0, result.stderr || result.error?.message);
   return result.stdout;
 }
@@ -195,6 +196,10 @@ test('reads live whole lines from both roots and rejects references outside them
   assert.deepEqual(await read(note.sourceId, {}, 'beta'), unavailable);
   assert.deepEqual(await read(sourceId('code', '../outside.md')), unavailable);
   assert.deepEqual(await read(sourceId('code', join(fixture.work, 'outside.md'))), unavailable);
+  if (windows) {
+    assert.deepEqual(await read(sourceId('code', 'folder\\outside.md')), unavailable);
+    assert.deepEqual(await read(sourceId('code', 'player.ts:stream.md')), unavailable);
+  }
   assert.deepEqual(await read('malformed'), unavailable);
   assert.deepEqual(readdirSync(fixture.checkout, { recursive: true }).sort(), filesBefore);
 
@@ -638,7 +643,11 @@ ${mode === undefined ? '' : `fs.chmodSync(output, ${mode});`}
 }
 
 function runWithEnv({ work, registry }, env, ...args) {
-  return spawnSync(process.execPath, [entry, '--registry', registry, ...args], { cwd: work, env, encoding: 'utf8' });
+  const result = spawnSync(process.execPath, [entry, '--registry', registry, ...args], {
+    cwd: work, env, encoding: 'utf8', timeout: commandTimeout, killSignal: 'SIGKILL'
+  });
+  assert.ifError(result.error);
+  return result;
 }
 
 macTest('distinguishes repeated Word headings in a second Git checkout', { timeout: 10000 }, async t => {
