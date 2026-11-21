@@ -12,7 +12,7 @@ import { evidenceFormat, evidenceLocation, versionHash, type ImageBlock } from '
 import { linksId } from './links.ts';
 import { commitNote, noteInput, savedNoteRoot } from './notes.ts';
 import { readLines } from './read.ts';
-import { isNoteCitationPath, isSourcePath, requireSource, savedNotesId, sourceId } from './sources.ts';
+import { isNoteCitationPath, isSourcePath, readLiveSource, savedNotesId, sourceId } from './sources.ts';
 import {
   indexCoverage, indexRoots, indexSavedNote, liveInventory, openEvidence, readTextPassage, refreshProject, searchProject
 } from './index.ts';
@@ -92,7 +92,9 @@ async function serve(registryPath: string) {
         const images: ImageBlock[] = [];
         return result(handler(parsed.data, images), images);
       } catch (error) {
-        return result({ error: error instanceof MarginError ? error.message : 'registry_unavailable' });
+        return result(error instanceof MarginError
+          ? { error: error.message, detail: error.detail }
+          : { error: 'registry_unavailable' });
       }
     });
   }
@@ -112,7 +114,7 @@ async function serve(registryPath: string) {
     const { projectId } = args;
     const { project, allRoots } = getProject(registryPath, projectId);
     const sources: { sourceId: string; rootId: string; relativePath: string }[] = [];
-    const warnings: { rootId: string; error: string }[] = [];
+    const warnings: { rootId: string; error: string; detail?: string }[] = [];
     const { roots, notesUnavailable } = discoveryRoots(registryPath, projectId, project, allRoots);
     const inventory = liveInventory(roots);
     for (const [rootId, live] of inventory) {
@@ -127,8 +129,8 @@ async function serve(registryPath: string) {
       ['list_sources', projectId], 2, args);
     const coverage = indexCoverage(registryPath, projectId, roots, allRoots, inventory);
     if (notesUnavailable) {
-      warnings.push({ rootId: savedNotesId, error: 'root_unavailable' });
-      reportUnavailableNotes(coverage);
+      warnings.push({ rootId: savedNotesId, ...notesUnavailable });
+      reportUnavailableNotes(coverage, notesUnavailable);
     }
     return { sources: results, nextCursor, warnings, coverage };
   });
@@ -148,9 +150,10 @@ async function serve(registryPath: string) {
     const { project, allRoots } = getProject(registryPath, projectId);
     const [, rootId, relativePath] = parseSourceId(projectId, sourceId);
     const root = sourceRoot(projectId, project, allRoots, rootId);
-    const path = requireSource(root, relativePath);
-    if (evidenceFormat(relativePath)) throw new MarginError('evidence_required');
-    return { sourceId, rootId, relativePath, ...readLines(path, startLine, lineCount) };
+    return readLiveSource(root, relativePath, fd => {
+      if (evidenceFormat(relativePath)) throw new MarginError('evidence_required');
+      return { sourceId, rootId, relativePath, ...readLines(fd, startLine, lineCount) };
+    });
   });
 
   tool('search_project', 'Search indexed text and verify each citation against the live source.', z.strictObject({
@@ -160,7 +163,7 @@ async function serve(registryPath: string) {
     const { project, allRoots } = getProject(registryPath, projectId);
     const { roots, notesUnavailable } = discoveryRoots(registryPath, projectId, project, allRoots);
     const response = searchProject(registryPath, projectId, roots, allRoots, query, mode, limit);
-    if (notesUnavailable) reportUnavailableNotes(response.coverage);
+    if (notesUnavailable) reportUnavailableNotes(response.coverage, notesUnavailable);
     return response;
   });
 
@@ -197,8 +200,8 @@ async function serve(registryPath: string) {
     });
     try {
       indexSavedNote(registryPath, args.projectId, allRoots, root, relativePath);
-    } catch {
-      return { status: 'saved_search_pending', noteId };
+    } catch (error) {
+      return { status: 'saved_search_pending', noteId, detail: error instanceof MarginError ? error.detail : undefined };
     }
     return { noteId, createdAt };
   }, { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
@@ -231,17 +234,17 @@ function getProject(registryPath: string, projectId: string) {
 
 function discoveryRoots(registryPath: string, projectId: string, project: Project, allRoots: Root[]) {
   try {
-    return { roots: indexRoots(project, savedNoteRoot(registryPath, projectId, allRoots)), notesUnavailable: false };
+    return { roots: indexRoots(project, savedNoteRoot(registryPath, projectId, allRoots)) };
   } catch (error) {
     if (!(error instanceof MarginError) || error.message !== 'note_storage_unavailable') throw error;
-    return { roots: indexRoots(project), notesUnavailable: true };
+    return { roots: indexRoots(project), notesUnavailable: { error: 'root_unavailable', detail: error.detail } };
   }
 }
 
-function reportUnavailableNotes(coverage: ReturnType<typeof indexCoverage>) {
+function reportUnavailableNotes(coverage: ReturnType<typeof indexCoverage>, gap: { error: string; detail?: string }) {
   coverage.complete = false;
   coverage.roots.push({
-    rootId: savedNotesId, status: 'failed', refreshedAt: undefined, gaps: [{ error: 'root_unavailable' }]
+    rootId: savedNotesId, status: 'failed', refreshedAt: undefined, gaps: [gap]
   });
 }
 
@@ -285,5 +288,6 @@ try {
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'Margin failed.');
+  if (error instanceof MarginError && error.detail) console.error(error.detail);
   process.exitCode = 1;
 }

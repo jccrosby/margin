@@ -1,12 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { z } from 'zod';
 
 import { maxBytes, readBytes } from './read.ts';
-import { MarginError } from './registry.ts';
+import { MarginError, unsafeStorage } from './registry.ts';
+import { requirePrivateAccess } from './macos.ts';
+import { readPrivateFile, requirePrivateDirectory } from './storage.ts';
 
 const formats = new Map<string, 'pdf' | 'docx' | 'image' | 'video'>([
   ['.pdf', 'pdf'], ['.docx', 'docx'], ['.png', 'image'], ['.jpg', 'image'], ['.jpeg', 'image'],
@@ -41,8 +42,17 @@ export type EvidenceItem = {
 };
 
 export type Evidence = {
-  items: EvidenceItem[]; errors: string[]; retrieval?: Retrieval; approvalsUsed?: string[]; lineBased?: true
+  items: EvidenceItem[]; errors: string[]; failureDetails?: Record<string, string>;
+  retrieval?: Retrieval; approvalsUsed?: string[]; lineBased?: true
 };
+export function recordExtractionError(evidence: Evidence, cause: unknown) {
+  const code = cause instanceof MarginError ? cause.message : 'extraction_failed';
+  evidence.errors.push(code);
+  if (cause instanceof MarginError && cause.detail) {
+    evidence.failureDetails = { ...evidence.failureDetails, [code]: cause.detail };
+  }
+}
+
 export type Retrieval = { approvedUrl: string; finalUrl: string; retrievedAt: string };
 export type ImageBlock = { type: 'image'; mimeType: string; data: string };
 
@@ -55,28 +65,44 @@ export function contentHash(bytes: string | Buffer) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-export function readEvidenceBytes(path: string) {
-  return readBytes(path, maxInputBytes);
+export function readEvidenceBytes(fd: number) {
+  return readBytes(fd, maxInputBytes);
 }
 
-function withSnapshot<T>(bytes: Buffer, extension: string, use: (directory: string, path: string) => T) {
-  const directory = mkdtempSync(join(realpathSync.native(tmpdir()), 'margin-evidence-'));
+function withSnapshot<T>(parent: string, bytes: Buffer, extension: string, use: (directory: string, path: string) => T) {
+  let directory;
+  try {
+    requirePrivateDirectory(parent);
+    directory = mkdtempSync(join(parent, '.margin-evidence-'));
+  } catch {
+    throw unsafeStorage('evidence_storage_unavailable', parent);
+  }
   try {
     const path = join(directory, `source${extension}`);
-    writeFileSync(path, bytes, { mode: 0o600 });
+    try {
+      requirePrivateDirectory(directory);
+      const fd = openSync(path, 'wx', 0o600);
+      try {
+        requirePrivateAccess(fd);
+        writeFileSync(fd, bytes);
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      throw unsafeStorage('evidence_storage_unavailable', directory);
+    }
     return use(directory, path);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 }
 
-function run(command: string, args: string[], maxBuffer = maxExtractedBytes) {
-  const result = spawnSync(command, args, {
+function run(directory: string, command: string, args: string[], maxBuffer = maxExtractedBytes) {
+  const result = spawnSync('/bin/sh', ['-c', 'umask 077; exec "$@"', 'margin', command, ...args], {
+    env: { ...process.env, TMPDIR: directory },
     timeout: commandTimeout, killSignal: 'SIGKILL', maxBuffer, stdio: ['ignore', 'pipe', 'pipe']
   });
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-    throw new MarginError(`${command}_unavailable`);
-  }
+  if (result.status === 127) throw new MarginError(`${command}_unavailable`);
   if (result.error || result.status !== 0) throw new MarginError(`${command}_failed`);
   return { stdout: result.stdout, stderr: result.stderr.toString('utf8') };
 }
@@ -93,22 +119,30 @@ const doclingOutput = z.object({
   }))
 });
 
-function docling(bytes: Buffer, extension: string) {
+function docling(bytes: Buffer, extension: string, scratchParent: string) {
   const format = evidenceFormat(`source${extension}`);
-  return withSnapshot(bytes, extension, (directory, path) => {
+  return withSnapshot(scratchParent, bytes, extension, (directory, path) => {
     const options = extension === '.html' ? ['--html-image-fetch', 'none'] : [];
     if (format !== 'image') options.push('--no-ocr');
-    run('docling', ['--to', 'json', '--output', directory, ...options, path]);
+    run(directory, 'docling', ['--to', 'json', '--output', directory, ...options, path]);
     const output = join(directory, 'source.json');
-    if (statSync(output).size > maxExtractedBytes) throw new MarginError('extraction_too_large');
-    return doclingOutput.parse(JSON.parse(readBytes(output, maxExtractedBytes).toString('utf8'))).texts;
+    let bytes;
+    try {
+      bytes = readPrivateFile(output, fd => readBytes(fd, maxExtractedBytes));
+    } catch (error) {
+      if (error instanceof MarginError && error.message === 'source_too_large') {
+        throw new MarginError('extraction_too_large');
+      }
+      throw unsafeStorage('evidence_storage_unavailable', output);
+    }
+    return doclingOutput.parse(JSON.parse(bytes.toString('utf8'))).texts;
   });
 }
 
-export function extractDocument(bytes: Buffer, extension: string, errors: string[]): EvidenceItem[] {
+export function extractDocument(bytes: Buffer, extension: string, errors: string[], scratchParent: string): EvidenceItem[] {
   const headings: string[] = [];
   const format = evidenceFormat(`source${extension}`);
-  return docling(bytes, extension).flatMap(({ label, text, level, prov }, index): EvidenceItem[] => {
+  return docling(bytes, extension, scratchParent).flatMap(({ label, text, level, prov }, index): EvidenceItem[] => {
     const item = index + 1;
     if (format === 'docx' && label === 'section_header') {
       const depth = level ?? 1;
@@ -152,13 +186,13 @@ function mediaInput(path: string, extension: string) {
   return ['-protocol_whitelist', 'file,pipe', '-f', format, '-i', path];
 }
 
-function transcript(bytes: Buffer, extension: string): EvidenceItem[] {
-  return withSnapshot(bytes, extension, (_directory, path) => {
+function transcript(bytes: Buffer, extension: string, scratchParent: string): EvidenceItem[] {
+  return withSnapshot(scratchParent, bytes, extension, (directory, path) => {
     const input = mediaInput(path, extension);
-    const { stdout: streams } = run('ffprobe', ['-v', 'error', ...input,
+    const { stdout: streams } = run(directory, 'ffprobe', ['-v', 'error', ...input,
       '-select_streams', 's:0', '-show_entries', 'stream=index', '-of', 'csv=p=0']);
     if (!streams.toString('utf8').trim()) return [];
-    const { stdout } = run('ffmpeg', ['-v', 'error', '-nostdin', '-copyts', '-start_at_zero', ...input,
+    const { stdout } = run(directory, 'ffmpeg', ['-v', 'error', '-nostdin', '-copyts', '-start_at_zero', ...input,
       '-map', '0:s:0', '-vn', '-an', '-f', 'webvtt', 'pipe:1']);
     const cues = /^((?:\d+:)?\d{2}:\d{2}\.\d{3}) --> ((?:\d+:)?\d{2}:\d{2}\.\d{3})[^\n]*\n((?:[^\n]+\n?)+)/gm;
     const parseTime = (value: string) => value.split(':').reduce((time, part) => time * 60 + Number(part), 0);
@@ -168,13 +202,14 @@ function transcript(bytes: Buffer, extension: string): EvidenceItem[] {
   });
 }
 
-export function extractEvidence(bytes: Buffer, path: string): Evidence {
+export function extractEvidence(bytes: Buffer, path: string, scratchParent: string): Evidence {
   const format = evidenceFormat(path);
   const extension = extname(path).toLowerCase();
   const items: EvidenceItem[] = format === 'image' ? [{ kind: 'image', location: { image: 1 } }] : [];
   const errors: string[] = [];
+  const evidence: Evidence = { items, errors };
   try {
-    const extracted = format === 'video' ? transcript(bytes, extension) : extractDocument(bytes, extension, errors);
+    const extracted = format === 'video' ? transcript(bytes, extension, scratchParent) : extractDocument(bytes, extension, errors, scratchParent);
     if (!extracted.length && !errors.length) {
       errors.push(format === 'video' ? 'transcript_unavailable' : format === 'image' ? 'ocr_unavailable' : 'no_extractable_text');
     }
@@ -183,9 +218,9 @@ export function extractEvidence(bytes: Buffer, path: string): Evidence {
       else if (!errors.includes('evidence_too_large')) errors.push('evidence_too_large');
     }
   } catch (error) {
-    errors.push(error instanceof MarginError ? error.message : 'extraction_failed');
+    recordExtractionError(evidence, error);
   }
-  return { items, errors };
+  return evidence;
 }
 
 export function imageBlock(bytes: Buffer, mimeType: string): ImageBlock {
@@ -202,11 +237,11 @@ export function originalImage(bytes: Buffer, path: string) {
   return imageBlock(bytes, png ? 'image/png' : 'image/jpeg');
 }
 
-export function videoFrame(bytes: Buffer, path: string, atSeconds: number) {
+export function videoFrame(bytes: Buffer, path: string, atSeconds: number, scratchParent: string) {
   const extension = extname(path).toLowerCase();
-  return withSnapshot(bytes, extension, (_directory, snapshot) => {
+  return withSnapshot(scratchParent, bytes, extension, (directory, snapshot) => {
     const offset = Math.max(0, atSeconds - 1e-9);
-    const { stdout, stderr } = run('ffmpeg', [
+    const { stdout, stderr } = run(directory, 'ffmpeg', [
       '-hide_banner', '-nostdin', '-copyts', '-start_at_zero', ...mediaInput(snapshot, extension), '-map', '0:v:0', '-an',
       '-vf', `select=gte(t\\,${offset.toFixed(9)}),scale=1280:1280:force_original_aspect_ratio=decrease,showinfo`,
       '-frames:v', '1', '-threads', '1', '-c:v', 'png', '-f', 'image2pipe', 'pipe:1'

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, constants, lstatSync, openSync } from 'node:fs';
+import { closeSync, constants, openSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { DatabaseSync, type SQLOutputValue } from 'node:sqlite';
 import {
   contentHash as hash, evidenceFormat, extractEvidence, originalImage, readEvidenceBytes, videoFrame,
@@ -8,8 +9,10 @@ import {
 import { fetchEvidence, linksId } from './links.ts';
 import { literalPassages, passageAtLines, rankedPassages, textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
-import { canonicalLocation, checkOutsideRoots, hasDarwinAcl, MarginError, type Project, type Root } from './registry.ts';
-import { requireListedSource, requireSource, savedNotesId, scanPaths, sourceId } from './sources.ts';
+import { checkOutsideRoots, MarginError, registryLocation, unsafeStorage, type Project, type Root } from './registry.ts';
+import { requirePrivateAccess } from './macos.ts';
+import { isMissing, readPrivateFile, requirePrivateDirectory } from './storage.ts';
+import { readLiveSource, savedNotesId, scanPaths, sourceId, withInventory, type SourceReader } from './sources.ts';
 
 type IndexRoot = Root | { id: typeof linksId; kind: 'links'; path: ''; urls: string[] };
 
@@ -21,7 +24,7 @@ export function indexRoots(project: Project, savedNotes?: Root): IndexRoot[] {
   return roots;
 }
 
-type Gap = { error: string; relativePath?: string };
+type Gap = { error: string; relativePath?: string; detail?: string };
 type Refresh = { status: string; refreshedAt?: string; gaps: Gap[] };
 export type Inventory = Map<string, ReturnType<typeof scanPaths> | { error: string }>;
 type Source = { rootId: string; rootKey: string; relativePath: string; hash: string; text: string };
@@ -35,19 +38,21 @@ function rootKey(root: IndexRoot) {
   return JSON.stringify([root.id, root.kind, root.path]);
 }
 
-function indexPath(registryPath: string, projectId: string, roots: Root[], privateNotes = false) {
-  // fix: Hash IDs to keep case variants separate on case-insensitive filesystems.
-  const path = `${canonicalLocation(registryPath)}.${hash(projectId)}.sqlite`;
+function indexPath(registryPath: string, projectId: string, roots: Root[]) {
+  // Hash IDs to keep distinct projects on case-insensitive filesystems.
+  const path = `${registryLocation(registryPath)}.${hash(projectId)}.sqlite`;
+  const parent = dirname(path);
+  try {
+    requirePrivateDirectory(parent);
+  } catch (error) {
+    throw unsafeStorage('index_unavailable', (error as NodeJS.ErrnoException).path ?? parent);
+  }
   for (const candidate of [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]) {
     checkOutsideRoots(candidate, roots, 'index');
     try {
-      const stat = lstatSync(candidate);
-      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 ||
-          (privateNotes && (stat.uid !== process.getuid?.() || hasDarwinAcl(candidate)))) {
-        throw new MarginError('index_unavailable');
-      }
+      readPrivateFile(candidate, () => undefined);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      if (!isMissing(error)) throw unsafeStorage('index_unavailable', candidate);
     }
   }
   return path;
@@ -113,23 +118,37 @@ function enableWal(db: DatabaseSync) {
 
 function openIndex(path: string, write: boolean) {
   try {
-    if (write) closeSync(openSync(path, constants.O_CREAT | constants.O_NOFOLLOW | constants.O_WRONLY, 0o600));
-    else lstatSync(path);
-    const db = new DatabaseSync(path, { readOnly: !write, timeout: busyTimeout, enableForeignKeyConstraints: true });
     if (write) {
+      const fd = openSync(path, constants.O_CREAT | constants.O_NOFOLLOW | constants.O_WRONLY, 0o600);
       try {
-        // fix: WAL lets read-only clients read the last commit after a writer dies.
+        requirePrivateAccess(fd);
+      } finally {
+        closeSync(fd);
+      }
+    } else {
+      readPrivateFile(path, () => undefined);
+    }
+  } catch (error) {
+    if (!write && isMissing(error)) return undefined;
+    throw unsafeStorage('index_unavailable', path);
+  }
+
+  try {
+    const db = new DatabaseSync(path, { readOnly: !write, timeout: busyTimeout, enableForeignKeyConstraints: true });
+    try {
+      db.exec('PRAGMA temp_store = MEMORY');
+      if (write) {
+        // WAL lets readers access the last commit after a writer dies.
         enableWal(db);
         db.exec('PRAGMA synchronous = FULL');
         db.exec(schema);
-      } catch (error) {
-        db.close();
-        throw error;
       }
+      return db;
+    } catch (error) {
+      db.close();
+      throw error;
     }
-    return db;
-  } catch (error) {
-    if (!write && (error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+  } catch {
     throw new MarginError('index_unavailable');
   }
 }
@@ -147,40 +166,41 @@ export async function refreshProject(registryPath: string, projectId: string, ro
   const privateNotes = registered.includes(savedNotesId);
   // fix: A first save can create the note root after refresh checks for it.
   if (!privateNotes) registered.push(savedNotesId);
-  const db = openIndex(indexPath(registryPath, projectId, allRoots, privateNotes), true)!;
+  const db = openIndex(indexPath(registryPath, projectId, allRoots), true)!;
   try {
     const placeholders = registered.map(() => '?').join(', ');
     db.prepare(`DELETE FROM sources WHERE rootId NOT IN (${placeholders})`).run(...registered);
     db.prepare(`DELETE FROM refreshes WHERE rootId NOT IN (${placeholders})`).run(...registered);
     const refreshed = [];
-    for (const root of roots) refreshed.push({ rootId: root.id, ...await refreshRoot(db, root) });
+    const scratchParent = dirname(registryLocation(registryPath));
+    for (const root of roots) refreshed.push({ rootId: root.id, ...await refreshRoot(db, root, scratchParent) });
     return refreshed;
   } finally {
     db.close();
   }
 }
 
-async function refreshRoot(db: DatabaseSync, root: IndexRoot) {
+async function refreshRoot(db: DatabaseSync, root: IndexRoot, scratchParent: string) {
   const key = rootKey(root);
   const attempt = randomUUID();
   db.prepare(`INSERT INTO refreshes VALUES (?, ?, ?, 'refreshing', NULL, '[]')
     ON CONFLICT(rootKey) DO UPDATE SET attempt = excluded.attempt, status = 'refreshing'`).run(key, root.id, attempt);
-  const links = root.kind === 'links' ? await getLinks(root.urls) : undefined;
+  const links = root.kind === 'links' ? await getLinks(root.urls, scratchParent) : undefined;
   db.exec('BEGIN IMMEDIATE');
   try {
     if (db.prepare('SELECT attempt FROM refreshes WHERE rootKey = ?').get(key)?.attempt === attempt) {
       if (root.kind === 'links') {
         publishLinks(db, root, key, links!);
       } else {
-        let inventory;
         try {
-          inventory = scanPaths(root);
+          withInventory(root, (inventory, read) => publishRoot(db, root, key, inventory, read, scratchParent));
         } catch (error) {
-          const gap = error instanceof MarginError ? error.message : 'root_scan_failed';
+          if (!(error instanceof MarginError) || !['root_unavailable', 'root_scan_failed'].includes(error.message)) {
+            throw error;
+          }
           db.prepare("UPDATE refreshes SET status = 'failed', gaps = ? WHERE rootKey = ?")
-            .run(JSON.stringify([{ error: gap }]), key);
+            .run(JSON.stringify([{ error: error.message }]), key);
         }
-        if (inventory) publishRoot(db, root, key, inventory);
       }
     }
     db.exec('COMMIT');
@@ -191,7 +211,8 @@ async function refreshRoot(db: DatabaseSync, root: IndexRoot) {
   return getRefresh(db, key);
 }
 
-function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: ReturnType<typeof scanPaths>) {
+function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: ReturnType<typeof scanPaths>,
+  read: SourceReader, scratchParent: string) {
   const old = db.prepare('SELECT id, rootKey, relativePath, hash FROM sources WHERE rootId = ?').all(root.id);
   const retained = new Set([...inventory.paths, ...inventory.unreadable]);
   const previous = new Map(old.filter(row => row.rootKey === key).map(row => [row.relativePath, row]));
@@ -206,9 +227,8 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
     let bytes;
     const format = evidenceFormat(relativePath);
     try {
-      const path = requireListedSource(root, relativePath);
-      if (format) bytes = readEvidenceBytes(path);
-      text = format ? '' : readText(path);
+      if (format) bytes = read(relativePath, readEvidenceBytes);
+      else text = read(relativePath, readText);
     } catch (cause) {
       gaps.push({ error: cause instanceof MarginError ? cause.message : 'source_unavailable', relativePath });
       continue;
@@ -219,14 +239,14 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
       const digest = hash(bytes);
       let evidence = entry?.hash === digest ? storedEvidence(db, root.id, key, relativePath)?.evidence : undefined;
       if (evidence && !evidence.errors.length) continue;
-      evidence = extractEvidence(bytes, relativePath);
-      for (const error of evidence.errors) gaps.push({ error, relativePath });
+      evidence = extractEvidence(bytes, relativePath, scratchParent);
+      for (const error of evidence.errors) gaps.push({ error, relativePath, detail: evidence.failureDetails?.[error] });
       if (entry) removeSource.run(entry.id);
       saveEvidence(db, root.id, key, relativePath, digest, evidence);
       continue;
     }
 
-    if (publishText(relativePath, text, entry)) {
+    if (publishText(relativePath, text!, entry)) {
       gaps.push({ error: 'line_too_long', relativePath });
     }
   }
@@ -255,13 +275,13 @@ function textPublisher(db: DatabaseSync, rootId: string, key: string) {
 
 export function indexSavedNote(registryPath: string, projectId: string, allRoots: Root[], root: Root,
   relativePath: string) {
-  const db = openIndex(indexPath(registryPath, projectId, allRoots, true), true)!;
+  const db = openIndex(indexPath(registryPath, projectId, allRoots), true)!;
   try {
     db.exec('BEGIN IMMEDIATE');
     const key = rootKey(root);
     const previous = db.prepare('SELECT id, hash FROM sources WHERE rootKey = ? AND relativePath = ?')
       .get(key, relativePath);
-    const text = readText(requireSource(root, relativePath));
+    const text = readLiveSource(root, relativePath, readText);
     const gaps = getRefresh(db, key).gaps.filter(gap => gap.relativePath !== relativePath);
     const publishText = textPublisher(db, root.id, key);
     if (publishText(relativePath, text, previous)) {
@@ -277,14 +297,16 @@ export function indexSavedNote(registryPath: string, projectId: string, allRoots
   }
 }
 
-async function getLinks(urls: string[]) {
+async function getLinks(urls: string[], scratchParent: string) {
   const successes = new Map<string, Awaited<ReturnType<typeof fetchEvidence>>>();
   const gaps: Gap[] = [];
   for (const url of urls) {
     try {
-      const fetched = await fetchEvidence(url, urls);
+      const fetched = await fetchEvidence(url, urls, scratchParent);
       successes.set(url, fetched);
-      for (const error of fetched.evidence.errors) gaps.push({ error, relativePath: url });
+      for (const error of fetched.evidence.errors) {
+        gaps.push({ error, relativePath: url, detail: fetched.evidence.failureDetails?.[error] });
+      }
     } catch (cause) {
       gaps.push({ error: cause instanceof MarginError ? cause.message : 'fetch_failed', relativePath: url });
     }
@@ -335,18 +357,18 @@ export function liveInventory(roots: IndexRoot[]): Inventory {
 type Coverage = ReturnType<typeof collectCoverage>;
 
 function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inventory: Inventory,
-  indexUnavailable = false
+  indexProblem?: Gap
 ) {
   const coverage = roots.map(root => {
     const key = rootKey(root);
     const { status, refreshedAt, gaps } = getRefresh(db, key);
     const live = inventory.get(root.id)!;
     const savedNotes = root.id === savedNotesId;
-    if (indexUnavailable) gaps.push({ error: 'index_unavailable' });
+    if (indexProblem) gaps.push(indexProblem);
     if ('error' in live) gaps.push(live);
     else {
       for (const relativePath of live.unreadable) gaps.push({ error: 'source_unavailable', relativePath });
-      if (!indexUnavailable && (savedNotes || (db && status !== 'not_refreshed'))) {
+      if (!indexProblem && (savedNotes || (db && status !== 'not_refreshed'))) {
         const indexed = new Set(db?.prepare('SELECT relativePath FROM sources WHERE rootKey = ?')
           .all(key).map(row => row.relativePath as string));
         const failed = new Set(gaps.map(gap => gap.relativePath));
@@ -370,10 +392,9 @@ function collectCoverage(db: DatabaseSync | undefined, roots: IndexRoot[], inven
 }
 
 function withIndex<T>(
-  registryPath: string, projectId: string, allRoots: Root[], read: (db: DatabaseSync | undefined) => T,
-  privateNotes = false
+  registryPath: string, projectId: string, allRoots: Root[], read: (db: DatabaseSync | undefined) => T
 ) {
-  const db = openIndex(indexPath(registryPath, projectId, allRoots, privateNotes), false);
+  const db = openIndex(indexPath(registryPath, projectId, allRoots), false);
   try {
     db?.exec('BEGIN');
     return read(db);
@@ -388,11 +409,14 @@ function withIndex<T>(
 export function indexCoverage(registryPath: string, projectId: string, roots: IndexRoot[],
   allRoots: Root[], inventory: Inventory) {
   try {
-    return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory),
-      roots.some(root => root.id === savedNotesId));
-  } catch {
-    return collectCoverage(undefined, roots, inventory, true);
+    return withIndex(registryPath, projectId, allRoots, db => collectCoverage(db, roots, inventory));
+  } catch (error) {
+    return collectCoverage(undefined, roots, inventory, indexGap(error));
   }
+}
+
+function indexGap(cause: unknown): Gap {
+  return { error: 'index_unavailable', detail: cause instanceof MarginError ? cause.detail : undefined };
 }
 
 function storedEvidence(db: DatabaseSync | undefined, rootId: string, key: string, relativePath: string) {
@@ -407,9 +431,9 @@ function storedEvidence(db: DatabaseSync | undefined, rootId: string, key: strin
 
 export function readTextPassage(root: Root, relativePath: string, requestedHash: string, location: LineLocation) {
   if (evidenceFormat(relativePath)) throw new MarginError('evidence_unavailable');
-  const sourceText = readText(requireSource(root, relativePath), bytes => {
+  const sourceText = readLiveSource(root, relativePath, fd => readText(fd, bytes => {
     if (hash(bytes) !== requestedHash) throw new MarginError('stale_citation');
-  });
+  }));
   const text = passageAtLines(sourceText, location.startLine, location.endLine);
   if (text === undefined) throw new MarginError('evidence_unavailable');
   return text;
@@ -438,7 +462,7 @@ export function openEvidence(registryPath: string, projectId: string, root: Inde
       item = selectEvidence(evidence, location, item => item.text !== undefined);
     }
     return { data: { ...source, contentHash, ...evidence.retrieval, failures: evidence.errors,
-      ...(item ?? { kind: 'link', location: {} }) } };
+      failureDetails: evidence.failureDetails, ...(item ?? { kind: 'link', location: {} }) } };
   }
   if (!format) {
     if (!requestedHash || !location || !('startLine' in location)) throw new MarginError('evidence_unavailable');
@@ -447,29 +471,31 @@ export function openEvidence(registryPath: string, projectId: string, root: Inde
     return { data: { ...source, contentHash: requestedHash, kind: 'extracted_text', location, text, failures: [] } };
   }
   if (atSeconds !== undefined && format !== 'video') throw new MarginError('invalid_argument');
-  const bytes = readEvidenceBytes(requireSource(root, relativePath));
+  const bytes = readLiveSource(root, relativePath, readEvidenceBytes);
   const contentHash = hash(bytes);
   if (requestedHash && requestedHash !== contentHash) throw new MarginError('stale_citation');
   const media = format === 'image' || (format === 'video' && (atSeconds !== undefined ||
     (location && 'timestampSeconds' in location)));
   let indexed;
-  const failures = [];
+  let indexFailure;
   try {
     indexed = lookup();
   } catch (error) {
     if (!media || !(error instanceof MarginError) || error.message !== 'index_unavailable') throw error;
-    failures.push(error.message);
+    indexFailure = error;
   }
   const evidence = indexed?.contentHash === contentHash ? indexed.evidence : undefined;
   const base = {
-    ...source, contentHash, failures: evidence?.errors ?? failures
+    ...source, contentHash, failures: evidence?.errors ?? (indexFailure ? [indexFailure.message] : []),
+    failureDetails: evidence?.failureDetails ??
+      (indexFailure?.detail ? { [indexFailure.message]: indexFailure.detail } : undefined)
   };
   if (format === 'image' && (!location || ('image' in location && !('item' in location)))) {
     return { data: { ...base, kind: 'image', location: { image: 1 } }, image: originalImage(bytes, relativePath) };
   }
   if (format === 'video' && (atSeconds !== undefined || (location && 'timestampSeconds' in location))) {
     const timestamp = location && 'timestampSeconds' in location ? location.timestampSeconds : atSeconds!;
-    const frame = videoFrame(bytes, relativePath, timestamp);
+    const frame = videoFrame(bytes, relativePath, timestamp, dirname(registryLocation(registryPath)));
     if (atSeconds === undefined && Math.abs(frame.location.timestampSeconds - timestamp) > 1e-9) {
       throw new MarginError('evidence_unavailable');
     }
@@ -497,7 +523,7 @@ function selectEvidence(evidence: Evidence, location: EvidenceItem['location'] |
 function rankedQuery(query: string) {
   const db = new DatabaseSync(':memory:');
   try {
-    db.exec("CREATE VIRTUAL TABLE tokens USING fts5(text); CREATE VIRTUAL TABLE terms USING fts5vocab(tokens, 'row')");
+    db.exec("PRAGMA temp_store = MEMORY; CREATE VIRTUAL TABLE tokens USING fts5(text); CREATE VIRTUAL TABLE terms USING fts5vocab(tokens, 'row')");
     db.prepare('INSERT INTO tokens VALUES (?)').run(query);
     return db.prepare('SELECT term FROM terms').all()
       .map(({ term }) => `"${String(term).replaceAll('"', '""')}"`).join(' AND ');
@@ -609,22 +635,23 @@ export function searchProject(registryPath: string, projectId: string, roots: In
       }
     }
     return { hits, coverage };
-  }, roots.some(root => root.id === savedNotesId));
+  });
   try {
     return search();
   } catch (error) {
     if (error instanceof MarginError && error.message !== 'index_unavailable') throw error;
     const notes = inventory.get(savedNotesId);
     if (!notes || !('paths' in notes) || !notes.paths.length) throw error;
-    return { hits: [], coverage: collectCoverage(undefined, roots, inventory, true) };
+    return { hits: [], coverage: collectCoverage(undefined, roots, inventory, indexGap(error)) };
   }
 }
 
 function verify(root: Root, relativePath: string, expected: string, coverage: Coverage) {
   let error: string;
   try {
-    const path = requireSource(root, relativePath);
-    if (hash(evidenceFormat(relativePath) ? readEvidenceBytes(path) : readText(path)) === expected) return true;
+    const content = readLiveSource(root, relativePath, fd => evidenceFormat(relativePath)
+      ? readEvidenceBytes(fd) : readText(fd));
+    if (hash(content) === expected) return true;
     error = 'source_changed';
   } catch (cause) {
     error = cause instanceof MarginError ? cause.message : 'source_unavailable';

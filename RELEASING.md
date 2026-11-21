@@ -21,13 +21,13 @@
 
 ## Publish the first version
 
-On macOS with Node.js 26, pnpm, npm, and Git, check out the release commit on a clean `main`.
+Use macOS 26 on Apple silicon with local APFS, Node.js 26, pnpm, npm, Git, and the Xcode Command Line Tools. Check out the release commit on a clean `main`.
 
 ```sh
 pnpm run release:bootstrap --publish
 ```
 
-The command runs the tests, checks the archive, and prints its source commit and SHA-256. It then prompts for npm login and publishes that archive. Sign in as `jccrosby` and use a short-lived classic token with `write:packages` as the password.
+The command runs the tests, checks the archive with both package launchers, and prints its source commit and SHA-256. It then prompts for npm login and publishes that archive. Sign in as `jccrosby` and use a short-lived classic token with `write:packages` as the password.
 
 Run `pnpm run release:bootstrap` to check the package without signing in or publishing.
 

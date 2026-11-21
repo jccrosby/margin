@@ -65,7 +65,9 @@ Refresh saves searchable text from HTML, PDF, plain text, Markdown, and JSON res
 
 ## Save a project note
 
-Note saves are off by default. Keep the registry in a directory that only your local account can access. A directory with a macOS access control list (ACL) cannot store private notes.
+Note saves are off by default. Keep the registry in a directory that only your local account can access.
+
+Margin rejects storage with access control list (ACL) grants. A deny-only ACL can pass the storage check.
 
 Enable saves for a project from the terminal.
 

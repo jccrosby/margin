@@ -1,4 +1,4 @@
-import { contentHash, extractDocument, type Evidence, type EvidenceItem } from './evidence.ts';
+import { contentHash, extractDocument, recordExtractionError, type Evidence, type EvidenceItem } from './evidence.ts';
 import { rankedPassages, textLines } from './passages.ts';
 import { maxBytes } from './read.ts';
 import { approvedHttpsUrl, MarginError } from './registry.ts';
@@ -9,7 +9,7 @@ const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 const maxRequests = 6;
 const maxResponseBytes = 8 * 1024 * 1024;
 
-export async function fetchEvidence(approvedUrl: string, approvals: string[]) {
+export async function fetchEvidence(approvedUrl: string, approvals: string[], scratchParent: string) {
   const signal = AbortSignal.timeout(15_000);
   const requested: string[] = [];
   let current = approvedUrl;
@@ -49,23 +49,23 @@ export async function fetchEvidence(approvedUrl: string, approvals: string[]) {
     const mediaType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
     let sourceText;
     try {
-      const parsed = linkItems(bytes, mediaType, evidence.errors);
+      const parsed = linkItems(bytes, mediaType, evidence.errors, scratchParent);
       evidence.items = parsed.items;
       sourceText = parsed.sourceText;
       if (sourceText !== undefined) evidence.lineBased = true;
       if (!evidence.items.length && !evidence.errors.length) evidence.errors.push('no_extractable_text');
     } catch (error) {
-      evidence.errors.push(error instanceof MarginError ? error.message : 'extraction_failed');
+      recordExtractionError(evidence, error);
     }
     return { digest: contentHash(bytes), evidence, sourceText };
   }
   throw new MarginError('redirect_limit');
 }
 
-function linkItems(bytes: Buffer, mediaType: string | undefined, errors: string[]):
+function linkItems(bytes: Buffer, mediaType: string | undefined, errors: string[], scratchParent: string):
   { items: EvidenceItem[]; sourceText?: string } {
   if (mediaType === 'text/html' || mediaType === 'application/pdf') {
-    const items = extractDocument(bytes, mediaType === 'text/html' ? '.html' : '.pdf', errors);
+    const items = extractDocument(bytes, mediaType === 'text/html' ? '.html' : '.pdf', errors, scratchParent);
     if (items.some(item => Buffer.byteLength(item.text!) > maxBytes)) errors.push('evidence_too_large');
     return { items: items.filter(item => Buffer.byteLength(item.text!) <= maxBytes) };
   }
