@@ -8,7 +8,7 @@ import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const windows = process.platform === 'win32';
@@ -20,10 +20,16 @@ function linkDirectory(target, path) {
 }
 
 const entry = fileURLToPath(new URL('../src/margin.ts', import.meta.url));
+const fixtures = new Set();
+after(() => {
+  for (const path of fixtures) {
+    rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
 
-function setup(t) {
-  const work = realpathSync(mkdtempSync(join(tmpdir(), 'margin-test-')));
-  t.after(() => rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+function setup(t, prefix = 'margin-test-') {
+  const work = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  t.after(() => { fixtures.add(work); });
   const checkout = join(work, 'checkout');
   const notes = join(work, 'notes');
   const registry = join(work, 'private', 'projects.json');
@@ -42,15 +48,19 @@ function run(cwd, command, ...args) {
   return result.stdout;
 }
 
+function stop(child, signal = 'SIGKILL') {
+  if (child.exitCode !== null || child.signalCode !== null) return [child.exitCode, child.signalCode];
+  const exited = once(child, 'exit');
+  child.kill(signal);
+  return exited;
+}
+
 async function connect(t, { work, registry, env = process.env, nodeArgs = [] }) {
   const child = spawn(process.execPath, [...nodeArgs, entry, '--registry', registry, 'serve'], { cwd: work, env });
   const messages = createInterface({ input: child.stdout });
-  t.after(async () => {
+  t.after(() => {
     messages.close();
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    const exited = once(child, 'exit');
-    child.kill('SIGKILL');
-    await exited;
+    return stop(child);
   });
   let stderr = '';
   child.stderr.on('data', chunk => { stderr += chunk; });
@@ -79,9 +89,7 @@ async function connect(t, { work, registry, env = process.env, nodeArgs = [] }) 
   return {
     sendCall: (name, args) => send('tools/call', { name, arguments: args }),
     async stop(signal = 'SIGTERM') {
-      const exited = once(child, 'exit');
-      child.kill(signal);
-      return exited;
+      return stop(child, signal);
     },
     callResult: (name, args) => request('tools/call', { name, arguments: args }),
     listTools: () => request('tools/list'),
@@ -489,7 +497,7 @@ macTest('an interrupted refresh keeps the last committed index and retry replace
   const env = gitShim(fixture, `touch ${shellQuote(ready)}; kill -STOP "$PPID"`);
   const child = spawn(process.execPath, [entry, '--registry', fixture.registry, 'refresh', 'alpha'],
     { cwd: fixture.work, env, stdio: 'ignore' });
-  t.after(() => child.kill('SIGKILL'));
+  t.after(() => stop(child));
   const exited = once(child, 'exit');
   for (let attempt = 0; !existsSync(ready) && attempt < 100; attempt++) await delay(25);
   assert.equal(existsSync(ready), true);
@@ -554,7 +562,7 @@ DatabaseSync.prototype.exec = function (sql) {
 `);
   const child = spawn(process.execPath, ['--import', preloader, entry, '--registry', fixture.registry, 'refresh', 'alpha'],
     { cwd: fixture.work, stdio: 'ignore' });
-  t.after(() => child.kill('SIGKILL'));
+  t.after(() => stop(child));
   const exited = once(child, 'exit');
   for (let attempt = 0; !existsSync(ready) && attempt < 160; attempt++) await delay(25);
   assert.equal(existsSync(ready), true);
@@ -1592,4 +1600,87 @@ windowsTest('NTFS keeps Unicode filename spellings and skips junctions inside a 
   }
   const sourceId = Buffer.from(JSON.stringify(['alpha', 'notes', 'junction/outside.md'])).toString('base64url');
   assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId }), { error: 'source_unavailable' });
+});
+
+windowsTest('Windows CLI rejects unsupported path syntax and names it', t => {
+  const fixture = setup(t, 'Margin é tests ');
+  const paths = ['C:relative', '\\\\?\\C:\\device', '\\\\.\\C:\\device', 'C:\\checkout:stream', '\\\\localhost\\share'];
+  for (const path of paths) {
+    const result = runWithEnv(fixture, process.env, 'register', 'project', path);
+    assert.equal(result.status, 1, result.error?.message);
+    assert.ok(result.stderr.includes(path), result.stderr);
+    assert.match(result.stderr, /local NTFS/);
+  }
+});
+
+windowsTest('Windows uses verified files for discovery, reads, search, and citations', { timeout: 30000 }, async t => {
+  const fixture = setup(t, 'Margin é tests ');
+  const { work, checkout, cli } = fixture;
+  const text = 'Margin checks the citation.\nDistinct second line.\n';
+  const name = 'Réponse.md';
+  writeFileSync(join(checkout, name), text);
+  const alias = join(work, 'Checkout alias');
+  linkDirectory(checkout, alias);
+  cli('register', 'project', alias);
+  cli('refresh', 'project');
+  const { call } = await connect(t, fixture);
+  const projectId = 'project';
+  const listed = await call('list_sources', { projectId });
+  const { sourceId } = listed.sources.find(source => source.relativePath === name);
+  const read = await call('read_source', { projectId, sourceId, startLine: 2, lineCount: 1 });
+  assert.equal(read.text, 'Distinct second line.\n');
+
+  const search = mode => call('search_project', { projectId, query: 'Margin checks', mode });
+  const [hit] = (await search('ranked')).hits;
+  assert.equal(hit.sourceId, sourceId);
+  assert.equal((await search('literal')).hits[0].sourceId, sourceId);
+  const citation = { projectId, sourceId, contentHash: hit.contentHash,
+    location: { startLine: hit.startLine, endLine: hit.endLine } };
+
+  linkSync(join(checkout, name), join(work, 'Other name.md'));
+  assert.equal((await call('read_source', { projectId, sourceId })).error, 'source_unavailable');
+  assert.deepEqual((await search('ranked')).hits, []);
+  rmSync(join(work, 'Other name.md'));
+
+  const moved = join(work, 'Emplacement déplacé');
+  renameSync(checkout, moved);
+  linkDirectory(moved, checkout);
+  assert.equal((await call('read_source', { projectId, sourceId })).error, 'root_unavailable');
+  rmSync(alias);
+  linkDirectory(moved, alias);
+  cli('register', projectId, alias);
+  assert.equal((await call('open_evidence', citation)).text, text);
+  writeFileSync(join(moved, name), 'Changed content.\n');
+  assert.equal((await call('open_evidence', citation)).error, 'stale_citation');
+});
+
+windowsTest('Windows refuses a registry with an unrelated access grant', t => {
+  const fixture = setup(t);
+  const { checkout, registry, cli } = fixture;
+  cli('register', 'project', checkout);
+  const contents = readFileSync(registry);
+  execFileSync('icacls.exe', [registry, '/grant', '*S-1-1-0:R']);
+  const result = runWithEnv(fixture, process.env, 'refresh', 'project');
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /registry_unavailable/);
+  assert.match(result.stderr, /local NTFS/);
+  assert.deepEqual(readFileSync(registry), contents);
+});
+
+windowsTest('Windows refuses an unsafe SQLite sidecar before opening the index', t => {
+  const fixture = setup(t);
+  const { checkout, registry, cli } = fixture;
+  cli('register', 'project', checkout);
+  cli('refresh', 'project');
+  const directory = dirname(registry);
+  const [index] = readdirSync(directory).filter(name => name.endsWith('.sqlite'));
+  const path = join(directory, `${index}-wal`);
+  const contents = 'unsafe sidecar fixture';
+  writeFileSync(path, contents);
+  execFileSync('icacls.exe', [path, '/grant', '*S-1-1-0:R']);
+  const result = runWithEnv(fixture, process.env, 'refresh', 'project');
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /index_unavailable/);
+  assert.ok(result.stderr.includes(path), result.stderr);
+  assert.equal(readFileSync(path, 'utf8'), contents);
 });

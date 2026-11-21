@@ -74,7 +74,7 @@ export function loadRegistry(path: string) {
 export function registryLocation(path: string) {
   if ((windows ? path.split(/[\\/]/) : path.split(sep)).includes('..')) {
     throw new MarginError('registry_unavailable',
-      `Check ${JSON.stringify(path)}. Use an absolute registry path without '..' segments.`);
+      `Check ${windows ? path : JSON.stringify(path)}. Use an absolute registry path without '..' segments.`);
   }
   try {
     if (!isNativeAbsolutePath(path)) throw new Error('Invalid registry path.');

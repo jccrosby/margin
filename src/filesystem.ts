@@ -21,7 +21,7 @@ const native = require(fileURLToPath(new URL(`../dist/${addon}.node`, import.met
 const windowsErrors = new Map<number, string>([
   [2, 'ENOENT'], [3, 'ENOENT'], [5, 'EACCES'], [17, 'EXDEV'], [32, 'EACCES'], [50, 'ENOTSUP'],
   [80, 'EEXIST'], [87, 'EINVAL'], [123, 'EINVAL'], [183, 'EEXIST'], [267, 'ENOTDIR'],
-  [681, 'ELOOP'], [1920, 'ELOOP'], [1921, 'ELOOP']
+  [681, 'ELOOP'], [1920, 'ELOOP'], [1921, 'ELOOP'], [4395, 'ELOOP']
 ]);
 
 function fail(result: number): never {

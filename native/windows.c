@@ -133,18 +133,22 @@ static HANDLE open_component(HANDLE root, wchar_t *component, bool directory, bo
   }
   UNICODE_STRING name = { (USHORT)(length * sizeof(wchar_t)), (USHORT)(length * sizeof(wchar_t)), component };
   OBJECT_ATTRIBUTES object = {
-    sizeof(object), root, &name, OBJ_DONT_REPARSE | (exact ? 0 : OBJ_CASE_INSENSITIVE), NULL, NULL
+    .Length = sizeof(object),
+    .RootDirectory = root,
+    .ObjectName = &name,
+    .Attributes = OBJ_DONT_REPARSE | (exact ? 0 : OBJ_CASE_INSENSITIVE)
   };
   IO_STATUS_BLOCK status_block;
-  HANDLE handle;
+  HANDLE handle = INVALID_HANDLE_VALUE;
   const ACCESS_MASK access = directory
     ? FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE
     : FILE_GENERIC_READ;
   NTSTATUS status = nt_create_file(&handle, access, &object, &status_block, NULL, 0,
     FILE_SHARE_READ | FILE_SHARE_WRITE | (directory ? 0 : FILE_SHARE_DELETE), NT_OPEN,
     NT_SYNC_NONALERT | NT_OPEN_REPARSE | (directory ? NT_DIRECTORY : NT_NON_DIRECTORY), NULL, 0);
-  if (status < 0) {
-    SetLastError(nt_status_to_error(status));
+  if (status != 0 || handle == INVALID_HANDLE_VALUE) {
+    if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+    SetLastError(status != 0 ? nt_status_to_error(status) : ERROR_INVALID_HANDLE);
     return INVALID_HANDLE_VALUE;
   }
 
@@ -295,7 +299,7 @@ static bool current_user(PSID sid) {
 
 static bool user_owns_new_files(void) {
   HANDLE token;
-  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &token)) return false;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
   ULONG_PTR user[128], owner[128];
   DWORD size;
   BOOL ok = GetTokenInformation(token, TokenUser, user, sizeof(user), &size) &&
@@ -304,7 +308,12 @@ static bool user_owns_new_files(void) {
     TOKEN_OWNER expected = { ((TOKEN_USER *)user)->User.Sid };
     // SQLite and Node create files with the process token's default owner.
     if (!EqualSid(expected.Owner, ((TOKEN_OWNER *)owner)->Owner)) {
-      ok = SetTokenInformation(token, TokenOwner, &expected, sizeof(expected));
+      HANDLE writable;
+      ok = OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_DEFAULT, &writable);
+      if (ok) {
+        ok = SetTokenInformation(writable, TokenOwner, &expected, sizeof(expected));
+        CloseHandle(writable);
+      }
     }
   }
   CloseHandle(token);

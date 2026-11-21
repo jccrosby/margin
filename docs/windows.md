@@ -1,6 +1,8 @@
 # Install Margin on Windows
 
-Use Windows 11 25H2 x64, local NTFS, native Node.js 26, Git, and the Codex CLI. Run these commands in PowerShell. Use local drive paths like `C:\Users\you\Documents\my-project`.
+Use these steps with a Windows-enabled release of Margin. You need Windows 11 25H2 x64, local NTFS, native Node.js 26, Git, and the Codex CLI.
+
+Run these commands in PowerShell. Use local drive paths like `C:\Users\you\Documents\my-project`.
 
 ## Set up package access
 
@@ -32,11 +34,11 @@ npm.cmd login --scope=@jccrosby --registry=https://npm.pkg.github.com --auth-typ
 
 ## Install and register a project
 
-List the versions you can access. Set `$version` to one of those exact versions.
+List the versions you can access. Enter the exact version of a release that supports Windows.
 
 ```powershell
 npm.cmd view '@jccrosby/margin' versions --json --userconfig $npmrc
-$version = '0.1.0'
+$version = Read-Host 'Enter the exact Windows-enabled Margin version'
 $install = Join-Path $env:LOCALAPPDATA 'Margin apps\Café'
 New-Item -ItemType Directory -Path $install -Force | Out-Null
 npm.cmd install --prefix $install --userconfig $npmrc --save-exact "@jccrosby/margin@$version"
