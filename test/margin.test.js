@@ -1667,6 +1667,19 @@ windowsTest('Windows refuses a registry with an unrelated access grant', t => {
   assert.deepEqual(readFileSync(registry), contents);
 });
 
+windowsTest('Windows rejects a registry below an ancestor with untrusted delete-child rights', t => {
+  const fixture = setup(t);
+  const { checkout, registry, work, cli } = fixture;
+  cli('register', 'project', checkout);
+  const contents = readFileSync(registry);
+  execFileSync('icacls.exe', [work, '/grant', '*S-1-1-0:(DC)']);
+  const result = runWithEnv(fixture, process.env, 'refresh', 'project');
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /registry_unavailable/);
+  assert.ok(result.stderr.includes(work), result.stderr);
+  assert.deepEqual(readFileSync(registry), contents);
+});
+
 windowsTest('Windows refuses an unsafe SQLite sidecar before opening the index', t => {
   const fixture = setup(t);
   const { checkout, registry, cli } = fixture;

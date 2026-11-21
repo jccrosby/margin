@@ -5,6 +5,7 @@
 
 #include <windows.h>
 #include <aclapi.h>
+#include <sddl.h>
 #include <winternl.h>
 #include <node_api.h>
 #include <uv.h>
@@ -320,9 +321,20 @@ static bool user_owns_new_files(void) {
   return ok != FALSE;
 }
 
-static bool trusted(PSID sid, PSID user) {
-  return sid && IsValidSid(sid) && (EqualSid(sid, user) ||
-    IsWellKnownSid(sid, WinLocalSystemSid) || IsWellKnownSid(sid, WinBuiltinAdministratorsSid));
+static bool trusted(PSID sid, PSID user, bool ancestor) {
+  if (!sid || !IsValidSid(sid)) return false;
+  if (EqualSid(sid, user) || IsWellKnownSid(sid, WinLocalSystemSid) ||
+      IsWellKnownSid(sid, WinBuiltinAdministratorsSid)) return true;
+  if (!ancestor) return false;
+
+  // Windows Modules Installer owns some system ancestors, including C:\.
+  PSID installer;
+  if (!ConvertStringSidToSidW(L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", &installer)) {
+    return false;
+  }
+  bool matches = EqualSid(sid, installer);
+  LocalFree(installer);
+  return matches;
 }
 
 static bool private_handle(HANDLE handle, bool ancestor) {
@@ -339,7 +351,7 @@ static bool private_handle(HANDLE handle, bool ancestor) {
   if (GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
       &owner, NULL, &dacl, NULL, &security) != ERROR_SUCCESS) return false;
   bool safe = dacl && IsValidAcl(dacl) &&
-    (ancestor ? trusted(owner, user) : owner && IsValidSid(owner) && EqualSid(owner, user));
+    (ancestor ? trusted(owner, user, true) : owner && IsValidSid(owner) && EqualSid(owner, user));
   bool inheritable_user = false;
   const DWORD replacement = DELETE | FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER |
     FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA;
@@ -360,7 +372,7 @@ static bool private_handle(HANDLE handle, bool ancestor) {
     PSID sid = &allow->SidStart;
     DWORD mask = allow->Mask;
     MapGenericMask(&mask, &mapping);
-    if (!trusted(sid, user) && (!ancestor || (mask & replacement))) safe = false;
+    if ((!ancestor || (mask & replacement)) && !trusted(sid, user, ancestor)) safe = false;
     const BYTE inherit = CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
     if ((header->AceFlags & (inherit | NO_PROPAGATE_INHERIT_ACE)) == inherit &&
         IsValidSid(sid) && EqualSid(sid, user) && (mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS) {
