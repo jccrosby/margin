@@ -5,7 +5,9 @@ import { getSystemErrorName } from 'node:util';
 
 const require = createRequire(import.meta.url);
 export const windows = process.platform === 'win32';
-const addon = windows ? 'windows' : 'macos';
+const linux = process.platform === 'linux';
+export const localFilesystem = windows ? 'NTFS' : linux ? 'ext4' : 'APFS';
+const addon = windows ? 'windows' : linux ? 'linux' : 'macos';
 const native = require(fileURLToPath(new URL(`../dist/${addon}.node`, import.meta.url))) as {
   verifyVolume(path: string): number;
   openDirectory(path: string): number;

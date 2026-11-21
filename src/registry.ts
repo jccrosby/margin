@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'n
 import { z } from 'zod';
 
 import { requireGitCheckout } from './git.ts';
-import { entryPath, isNativeAbsolutePath, requirePrivateAccess, verifyVolume, windows, withDirectory, withEntry } from './filesystem.ts';
+import { entryPath, isNativeAbsolutePath, localFilesystem, requirePrivateAccess, verifyVolume, windows, withDirectory, withEntry } from './filesystem.ts';
 import { isMissing, readPrivateFile, requirePrivateDirectory } from './storage.ts';
 
 export const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
@@ -48,7 +48,7 @@ export function unsafeStorage(code: string, path: string) {
     return new MarginError(code, `Check ${path}. Use a private directory on a local NTFS drive. ` +
       'Remove other users’ access grants and links, or choose a directory under your Windows profile.');
   }
-  return new MarginError(code, `Check ${JSON.stringify(path)}. Use a local APFS directory you own with mode 0700. ` +
+  return new MarginError(code, `Check ${JSON.stringify(path)}. Use a local ${localFilesystem} directory you own with mode 0700. ` +
     'Set files to mode 0600. Remove ACL grants and links, or choose a different private location.');
 }
 
@@ -219,8 +219,7 @@ function directory(path: string) {
     withDirectory(canonical, () => undefined);
     return canonical;
   } catch {
-    const filesystem = windows ? 'NTFS' : 'APFS';
-    throw new MarginError('root_unavailable', `Use an absolute path to a local ${filesystem} directory. Check ${path}.`);
+    throw new MarginError('root_unavailable', `Use an absolute path to a local ${localFilesystem} directory. Check ${path}.`);
   }
 }
 

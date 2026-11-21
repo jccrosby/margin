@@ -68,4 +68,21 @@ node scripts/check-package.js $tarball --candidate
 
 The check installs the archive outside the checkout. It starts the installed CLI and MCP server through Node. Use the [Windows setup guide](docs/windows.md) to also check a fresh Codex session on Windows 11 25H2.
 
+## Check an Ubuntu candidate
+
+Run these commands on Ubuntu 24.04 LTS x64. Use local ext4, native Node.js 26, Git, and the `build-essential` and `acl` packages.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm test
+tarball="$(mktemp -d)/margin.tgz"
+pnpm pack --out "$tarball"
+node scripts/check-package.js "$tarball" --candidate
+```
+
+Set `MARGIN_TEST_BIND_MOUNTS=1` to include the bind mount test if your account can run `sudo -n mount` and `sudo -n umount`.
+
+The package check uses `npx` outside the checkout. Use the [Ubuntu setup guide](docs/ubuntu.md) to check a fresh Codex session.
+
 The release workflow blocks cross-platform publication until native qualification passes.
