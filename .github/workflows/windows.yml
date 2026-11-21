@@ -43,7 +43,7 @@ jobs:
           pnpm pack --out $tarball
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check-package.js $tarball --candidate
-      - name: Open evidence in a fresh Codex thread
+      - name: Open HTTPS and media evidence in a fresh Codex thread
         env:
           MARGIN_TEST_EXTRACTORS: '1'
         run: |

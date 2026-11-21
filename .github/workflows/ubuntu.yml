@@ -51,7 +51,7 @@ jobs:
           node scripts/check-package.js "$tarball" --candidate
           git rev-parse HEAD
           sha256sum "$tarball"
-      - name: Open evidence in a fresh Codex thread
+      - name: Open HTTPS and media evidence in a fresh Codex thread
         env:
           MARGIN_TEST_EXTRACTORS: '1'
         run: |
