@@ -25,7 +25,7 @@ if (candidate) {
 const sources = readdirSync(new URL('../src/', import.meta.url));
 const compiledFiles = sources.filter(file => file.endsWith('.ts'))
   .map(file => `package/dist/${file.replace(/\.ts$/, '.js')}`);
-const files = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' }).trim().split('\n');
+const files = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' }).trim().split(/\r?\n/);
 const macosAddon = 'package/dist/macos.node';
 const windowsAddon = 'package/dist/windows.node';
 const requiredAddon = windows ? windowsAddon : macosAddon;
