@@ -8,7 +8,7 @@ import { contentHash, lineLocation, versionHash } from './evidence.ts';
 import { textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
 import { checkOutsideRoots, id, MarginError, registryLocation, unsafeStorage, type Root } from './registry.ts';
-import { publishExclusive, requirePrivateAccess, withDirectory } from './macos.ts';
+import { publishExclusive, requirePrivateAccess, syncDirectory } from './filesystem.ts';
 import { isMissing, requirePrivateDirectory } from './storage.ts';
 import { readLiveSource, savedNotesDirectory, savedNotesId, sourceId } from './sources.ts';
 
@@ -90,11 +90,15 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
     const root = existingRoot ?? savedNoteRoot(registry, args.projectId, allRoots, true)!;
     const path = join(root.path, relativePath);
     const staged = join(root.path, `${randomUUID()}.tmp`);
-    const fd = openSync(staged, 'wx', 0o600);
     try {
-      requirePrivateAccess(fd);
-      writeFileSync(fd, text);
-      fsyncSync(fd);
+      const fd = openSync(staged, 'wx+', 0o600);
+      try {
+        requirePrivateAccess(fd);
+        writeFileSync(fd, text);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
       // Publish without overwriting another save or creating a second hard link.
       try {
         publishExclusive(staged, path);
@@ -102,10 +106,9 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         return reuse(root);
       }
-      withDirectory(root.path, fsyncSync);
+      syncDirectory(root.path);
       return { root, relativePath, noteId, createdAt };
     } finally {
-      closeSync(fd);
       rmSync(staged, { force: true });
     }
   } catch (error) {

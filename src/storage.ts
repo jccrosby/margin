@@ -1,6 +1,5 @@
-import { mkdirSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import { requirePrivateAccess, withDirectory, withEntry } from './macos.ts';
+import { createPrivateDirectory, requirePrivateAccess, withDirectory, withEntry } from './filesystem.ts';
 
 export function isMissing(error: unknown) {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
@@ -8,7 +7,7 @@ export function isMissing(error: unknown) {
 
 export function requirePrivateDirectory(path: string, create = false) {
   const parents = [path];
-  while (parents[0] !== '/') parents.unshift(dirname(parents[0]));
+  while (dirname(parents[0]) !== parents[0]) parents.unshift(dirname(parents[0]));
   for (const directory of parents) {
     const inspect = () => {
       try {
@@ -22,7 +21,7 @@ export function requirePrivateDirectory(path: string, create = false) {
     } catch (error) {
       if (!create || !isMissing(error)) throw error;
       try {
-        mkdirSync(directory, { mode: 0o700 });
+        createPrivateDirectory(directory);
       } catch (mkdirError) {
         if ((mkdirError as NodeJS.ErrnoException).code !== 'EEXIST') throw mkdirError;
       }

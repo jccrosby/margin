@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 import { maxBytes, readBytes } from './read.ts';
 import { MarginError, unsafeStorage } from './registry.ts';
-import { requirePrivateAccess } from './macos.ts';
+import { requirePrivateAccess } from './filesystem.ts';
 import { readPrivateFile, requirePrivateDirectory } from './storage.ts';
 
 const formats = new Map<string, 'pdf' | 'docx' | 'image' | 'video'>([
@@ -81,7 +81,7 @@ function withSnapshot<T>(parent: string, bytes: Buffer, extension: string, use: 
     const path = join(directory, `source${extension}`);
     try {
       requirePrivateDirectory(directory);
-      const fd = openSync(path, 'wx', 0o600);
+      const fd = openSync(path, 'wx+', 0o600);
       try {
         requirePrivateAccess(fd);
         writeFileSync(fd, bytes);

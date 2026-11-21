@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { isNativeAbsolutePath, windows } from './filesystem.ts';
 import { Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
@@ -258,7 +258,7 @@ function result(data: Record<string, unknown>, images: ImageBlock[] = []): CallT
 
 const [option, registryPath, command, ...args] = process.argv.slice(2);
 try {
-  if (option !== '--registry' || !registryPath || !isAbsolute(registryPath)) {
+  if (option !== '--registry' || !registryPath || (!windows && !isNativeAbsolutePath(registryPath))) {
     throw new Error('Use --registry with an absolute path.');
   }
   if (command === 'register' && (args.length === 2 || args.length === 3)) {

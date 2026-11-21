@@ -1,23 +1,56 @@
-import { closeSync, constants, openSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, mkdirSync, openSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { getSystemErrorName } from 'node:util';
 
 const require = createRequire(import.meta.url);
-const native = require(fileURLToPath(new URL('../dist/macos.node', import.meta.url))) as {
+export const windows = process.platform === 'win32';
+const addon = windows ? 'windows' : 'macos';
+const native = require(fileURLToPath(new URL(`../dist/${addon}.node`, import.meta.url))) as {
+  verifyVolume(path: string): number;
   openDirectory(path: string): number;
   openEntry(directory: number, path: string, isDirectory: boolean, exact: boolean): number;
   entries(directory: number): [Buffer, 'directory' | 'file'][] | number;
   privateAccess(fd: number, ancestor: boolean): boolean | number;
   entryPath(fd: number): string | number;
+  createPrivateDirectory(path: string): number;
   changeDirectory(fd: number): number;
   publish(from: string, to: string): number;
 };
 
-function check(result: number) {
-  if (result >= 0) return result;
-  const code = getSystemErrorName(result);
+const windowsErrors = new Map<number, string>([
+  [2, 'ENOENT'], [3, 'ENOENT'], [5, 'EACCES'], [17, 'EXDEV'], [32, 'EACCES'], [50, 'ENOTSUP'],
+  [80, 'EEXIST'], [87, 'EINVAL'], [123, 'EINVAL'], [183, 'EEXIST'], [267, 'ENOTDIR'],
+  [681, 'ELOOP'], [1920, 'ELOOP'], [1921, 'ELOOP']
+]);
+
+function fail(result: number): never {
+  const code = windows ? windowsErrors.get(-result) ?? 'EIO' : getSystemErrorName(result);
   throw Object.assign(new Error(code), { code });
+}
+
+function check(result: number) {
+  return result < 0 ? fail(result) : result;
+}
+
+export function isNativeAbsolutePath(path: string) {
+  if (!path.isWellFormed() || path.includes('\0')) return false;
+  if (!windows) return path.startsWith('/');
+  if (!/^[a-z]:[\\/]/i.test(path)) return false;
+  return path.slice(3).split(/[\\/]/).every(part => {
+    if (!part || part === '.' || part === '..') return true;
+    return !/[:<>"|?*\x00-\x1f]|[. ]$/.test(part) &&
+      !/^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(part);
+  });
+}
+
+export function verifyVolume(path: string) {
+  if (windows) check(native.verifyVolume(path));
+}
+
+export function createPrivateDirectory(path: string) {
+  if (windows) check(native.createPrivateDirectory(path));
+  else mkdirSync(path, { mode: 0o700 });
 }
 
 export function withDirectory<T>(path: string, use: (fd: number) => T): T {
@@ -42,13 +75,13 @@ export function withEntry<T>(directory: number, path: string, isDirectory: boole
 
 export function readEntries(fd: number) {
   const entries = native.entries(fd);
-  if (typeof entries === 'number') throw new Error(getSystemErrorName(entries));
+  if (typeof entries === 'number') fail(entries);
   return entries;
 }
 
 export function entryPath(fd: number) {
   const path = native.entryPath(fd);
-  if (typeof path === 'number') throw new Error(getSystemErrorName(path));
+  if (typeof path === 'number') fail(path);
   return path;
 }
 
@@ -60,7 +93,12 @@ export function publishExclusive(from: string, to: string) {
   check(native.publish(from, to));
 }
 
-export function runInDirectory<T>(directory: number, run: () => T): T {
+export function syncDirectory(path: string) {
+  if (!windows) withDirectory(path, fsyncSync);
+}
+
+export function runInDirectory<T>(directory: number, run: (cwd?: string) => T): T {
+  if (windows) return run(entryPath(directory));
   // Git inherits the verified directory. Keep this callback synchronous.
   const cwd = openSync('.', constants.O_RDONLY | constants.O_DIRECTORY);
   try {

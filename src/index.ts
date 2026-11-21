@@ -10,7 +10,7 @@ import { fetchEvidence, linksId } from './links.ts';
 import { literalPassages, passageAtLines, rankedPassages, textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
 import { checkOutsideRoots, MarginError, registryLocation, unsafeStorage, type Project, type Root } from './registry.ts';
-import { requirePrivateAccess } from './macos.ts';
+import { requirePrivateAccess } from './filesystem.ts';
 import { isMissing, readPrivateFile, requirePrivateDirectory } from './storage.ts';
 import { readLiveSource, savedNotesId, scanPaths, sourceId, withInventory, type SourceReader } from './sources.ts';
 
@@ -119,7 +119,7 @@ function enableWal(db: DatabaseSync) {
 function openIndex(path: string, write: boolean) {
   try {
     if (write) {
-      const fd = openSync(path, constants.O_CREAT | constants.O_NOFOLLOW | constants.O_WRONLY, 0o600);
+      const fd = openSync(path, constants.O_CREAT | constants.O_NOFOLLOW | constants.O_RDWR, 0o600);
       try {
         requirePrivateAccess(fd);
       } finally {

@@ -2,7 +2,7 @@ import { fstatSync } from 'node:fs';
 import { basename, extname, sep } from 'node:path';
 import { evidenceFormat } from './evidence.ts';
 import { git, requireGitCheckout } from './git.ts';
-import { readEntries, requirePrivateAccess, withDirectory, withEntry } from './macos.ts';
+import { readEntries, requirePrivateAccess, windows, withDirectory, withEntry } from './filesystem.ts';
 import { MarginError, type Root } from './registry.ts';
 
 export const savedNotesDirectory = '.margin-saved-notes';
@@ -140,7 +140,7 @@ function useEntry<T>(root: Root, fd: number, relativePath: string, use: (fd: num
   return withEntry(fd, relativePath, false, source => {
     if (privateNote) requirePrivateAccess(source);
     return use(source);
-  }, root.kind === 'context');
+  }, windows || root.kind === 'context');
 }
 
 type SourceInventory = { paths: string[]; unreadable: string[] };
