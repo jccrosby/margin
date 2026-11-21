@@ -29,3 +29,16 @@ jobs:
           pnpm pack --out $tarball
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check-package.js $tarball --candidate
+
+  acl-diagnostics:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    steps:
+      - name: Inspect test registry ancestors
+        run: |
+          $path = (Get-Item -LiteralPath $env:TEMP).FullName
+          while ($path) {
+            $acl = Get-Acl -LiteralPath $path
+            Write-Host "$path owner=$($acl.Owner) dacl=$($acl.GetSecurityDescriptorSddlForm('Access'))"
+            $path = Split-Path -Parent $path
+          }
