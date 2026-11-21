@@ -1004,7 +1004,7 @@ test('a fresh server can find a saved note through list, read, and both search m
       .filter(path => path.endsWith('.md'));
     assert.equal(noteFiles.length, 1);
     const notePath = join(dirname(fixture.registry), noteFiles[0]);
-    assert.equal(notePath.split('/').at(-1), relativePath);
+    assert.equal(basename(notePath), relativePath);
     writeFileSync(notePath, 'The local account changed this note.');
     assert.equal((await read('alpha')).text, 'The local account changed this note.');
     for (const mode of ['ranked', 'literal']) assert.deepEqual((await search('alpha', mode)).hits, []);
@@ -1276,9 +1276,16 @@ test('a matching save retry restores search for a committed note', { timeout: 10
   const directory = dirname(fixture.registry);
   const index = readdirSync(directory).find(name => name.endsWith('.sqlite'));
   assert.ok(index);
-  const db = new DatabaseSync(join(directory, index));
-  t.after(() => db.close());
-  db.exec(`CREATE TRIGGER fail_indexing BEFORE INSERT ON ranges BEGIN
+  function execFixtureSql(sql) {
+    const db = new DatabaseSync(join(directory, index));
+    try {
+      db.exec(sql);
+    } finally {
+      // Close this connection so it removes its sidecars before Margin opens the index.
+      db.close();
+    }
+  }
+  execFixtureSql(`CREATE TRIGGER fail_indexing BEFORE INSERT ON ranges BEGIN
     SELECT RAISE(ABORT, 'Fixture indexing failure');
   END`);
 
@@ -1309,7 +1316,7 @@ test('a matching save retry restores search for a committed note', { timeout: 10
       [{ error: 'source_not_indexed', relativePath: saved.relativePath }]);
   }
 
-  db.exec('DROP TRIGGER fail_indexing');
+  execFixtureSql('DROP TRIGGER fail_indexing');
   assert.deepEqual(await reader.call('save_project_note', args), { noteId, createdAt });
   for (const mode of ['literal', 'ranked']) {
     const result = await search(mode);
