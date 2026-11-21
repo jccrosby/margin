@@ -29,7 +29,7 @@ after(() => {
 });
 
 function setup(t, prefix = 'margin-test-') {
-  const work = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const work = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   t.after(() => { fixtures.add(work); });
   const checkout = join(work, 'checkout');
   const notes = join(work, 'notes');

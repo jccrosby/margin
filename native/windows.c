@@ -53,6 +53,19 @@ static bool path_arg(napi_env env, napi_value arg, wchar_t path[PATH_CAPACITY]) 
     copied == wcslen(path);
 }
 
+static bool drive_absolute(const wchar_t *path) {
+  return ((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) &&
+    path[1] == L':' && path[2] == L'\\';
+}
+
+static bool private_path_arg(napi_env env, napi_value arg, wchar_t path[PATH_CAPACITY + 4]) {
+  wchar_t *local = path + 4;
+  if (!path_arg(env, arg, local) || !drive_absolute(local)) return false;
+  // Keep Win32's legacy path limit out of verified private storage.
+  wmemcpy(path, L"\\\\?\\", 4);
+  return true;
+}
+
 static HANDLE handle_arg(napi_env env, napi_value arg) {
   int fd;
   if (napi_get_value_int32(env, arg, &fd) != napi_ok || fd < 0) return INVALID_HANDLE_VALUE;
@@ -99,8 +112,7 @@ static bool valid_handle(HANDLE handle, bool directory, BY_HANDLE_FILE_INFORMATI
 }
 
 static HANDLE volume_root(const wchar_t *path) {
-  if (!(((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) &&
-      path[1] == L':' && path[2] == L'\\')) {
+  if (!drive_absolute(path)) {
     SetLastError(ERROR_INVALID_NAME);
     return INVALID_HANDLE_VALUE;
   }
@@ -398,9 +410,9 @@ static napi_value private_access(napi_env env, napi_callback_info info) {
 static napi_value create_private_directory(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value args[1];
-  wchar_t path[PATH_CAPACITY];
+  wchar_t path[PATH_CAPACITY + 4];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-  if (argc != 1 || !path_arg(env, args[0], path)) return integer(env, -ERROR_INVALID_NAME);
+  if (argc != 1 || !private_path_arg(env, args[0], path)) return integer(env, -ERROR_INVALID_NAME);
 
   DWORD user[SECURITY_MAX_SID_SIZE / sizeof(DWORD)];
   DWORD acl_buffer[128];
@@ -419,9 +431,9 @@ static napi_value create_private_directory(napi_env env, napi_callback_info info
 static napi_value publish(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value args[2];
-  wchar_t from[PATH_CAPACITY], to[PATH_CAPACITY];
+  wchar_t from[PATH_CAPACITY + 4], to[PATH_CAPACITY + 4];
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-  if (argc != 2 || !path_arg(env, args[0], from) || !path_arg(env, args[1], to)) return integer(env, -ERROR_INVALID_NAME);
+  if (argc != 2 || !private_path_arg(env, args[0], from) || !private_path_arg(env, args[1], to)) return integer(env, -ERROR_INVALID_NAME);
   return MoveFileExW(from, to, MOVEFILE_WRITE_THROUGH) ? integer(env, 0) : error(env);
 }
 
