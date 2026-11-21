@@ -6,7 +6,8 @@
       "libraries": ["advapi32.lib"],
       "msvs_settings": {
         "VCCLCompilerTool": {
-          "AdditionalOptions": ["/std:c17"]
+          "AdditionalOptions!": ["-std:c++20"],
+          "LanguageStandard_C": "stdc17"
         }
       }
     }
