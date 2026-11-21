@@ -12,6 +12,8 @@ import { after, test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const windows = process.platform === 'win32';
+const linux = process.platform === 'linux';
+const linuxTest = linux ? test : test.skip;
 const macTest = process.platform === 'darwin' ? test : test.skip;
 const windowsTest = windows ? test : test.skip;
 const commandTimeout = 15_000;
@@ -100,6 +102,17 @@ async function connect(t, { work, registry, env = process.env, nodeArgs = [] }) 
     }
   };
 }
+
+test('the CLI reports the supported platforms when Node uses another architecture', t => {
+  const fixture = setup(t);
+  const unsupported = process.arch === 'arm64' ? 'x64' : 'arm64';
+  const spoof = `Object.defineProperty(process, 'arch', { value: '${unsupported}' });`;
+  const result = spawnSync(process.execPath,
+    ['--import', `data:text/javascript,${encodeURIComponent(spoof)}`, entry, '--registry', fixture.registry, 'serve'],
+    { cwd: fixture.work, encoding: 'utf8', timeout: commandTimeout });
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /Run Margin on macOS ARM64, Windows x64, or Ubuntu x64/);
+});
 
 test('the CLI registers roots and the MCP server lists projects with live cursors', { timeout: 10000 }, async t => {
   const fixture = setup(t);
@@ -544,7 +557,7 @@ test('a literal citation must include the complete match', { timeout: 10000 }, a
   assert.deepEqual(results.coverage.roots[0].gaps, [{ error: 'citation_unavailable', relativePath: 'large.ts' }]);
 });
 
-macTest('readers see the last commit while a refresh spills pages and after it dies', { timeout: 25000 }, async t => {
+(windows ? test.skip : test)('readers see the last commit while a refresh spills pages and after it dies', { timeout: 25000 }, async t => {
   const fixture = setup(t);
   writeFileSync(join(fixture.checkout, 'keep.ts'), 'fixtureWord\n');
   fixture.cli('register', 'alpha', fixture.checkout);
@@ -1486,7 +1499,7 @@ test('root aliases preserve Git IDs and matching citations after a root moves', 
   assert.deepEqual(await client.call('open_evidence', citation), { error: 'stale_citation' });
 });
 
-macTest('a source path replacement during read cannot change the opened file', { timeout: 10000 }, async t => {
+(windows ? test.skip : test)('a source path replacement during read cannot change the opened file', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   const name = 'entry.md';
   const original = join(fixture.notes, name);
@@ -1596,7 +1609,7 @@ macTest('unsafe extractor output reports its location and keeps other sources se
   assert.deepEqual(search.hits.map(hit => hit.relativePath), ['ordinary.md']);
 });
 
-windowsTest('NTFS keeps Unicode filename spellings and skips junctions inside a root', { timeout: 15000 }, async t => {
+(windows || linux ? test : test.skip)('local roots keep distinct Unicode spellings and skip directory links', { timeout: 15000 }, async t => {
   const fixture = setup(t);
   const first = 'caf\u00e9.md';
   const second = 'cafe\u0301.md';
@@ -1629,7 +1642,7 @@ windowsTest('Windows CLI rejects unsupported path syntax and names it', t => {
   }
 });
 
-windowsTest('Windows uses verified files for discovery, reads, search, and citations', { timeout: 30000 }, async t => {
+(windows || linux ? test : test.skip)('verified files support discovery, reads, search, and citations', { timeout: 30000 }, async t => {
   const fixture = setup(t, 'Margin é tests ');
   const { work, checkout, cli } = fixture;
   const text = 'Margin checks the citation.\nDistinct second line.\n';
@@ -1713,3 +1726,78 @@ windowsTest('Windows refuses an unsafe SQLite sidecar before opening the index',
   assert.ok(result.stderr.includes(path), result.stderr);
   assert.equal(readFileSync(path, 'utf8'), contents);
 });
+
+
+linuxTest('Ubuntu rejects unsupported filesystems and unsafe registry ancestors', t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  const before = readFileSync(fixture.registry);
+  const wrongVolume = runWithEnv(fixture, process.env, 'register', 'beta', fixture.checkout, '/dev/shm');
+  assert.equal(wrongVolume.status, 1);
+  assert.match(wrongVolume.stderr, /local ext4 directory.*\/dev\/shm/);
+
+  chmodSync(fixture.work, 0o777);
+  const unsafe = runWithEnv(fixture, process.env, 'register', 'beta', fixture.checkout);
+  assert.equal(unsafe.status, 1);
+  assert.ok(unsafe.stderr.includes(fixture.work));
+  assert.match(unsafe.stderr, /local ext4.*0700/);
+  assert.deepEqual(readFileSync(fixture.registry), before);
+});
+
+linuxTest('Ubuntu refuses inheritable ACLs before writing registry changes', t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  const before = readFileSync(fixture.registry);
+  const parent = dirname(fixture.registry);
+  execFileSync('setfacl', ['-m', 'd:u:65534:r-x', parent]);
+  assert.equal(statSync(parent).mode & 0o077, 0);
+
+  const result = runWithEnv(fixture, process.env, 'register', 'beta', fixture.checkout);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /registry_unavailable/);
+  assert.ok(result.stderr.includes(parent));
+  assert.deepEqual(readFileSync(fixture.registry), before);
+  assert.deepEqual(readdirSync(parent), [basename(fixture.registry)]);
+});
+
+linuxTest('Ubuntu refuses an ACL on an owner-only SQLite sidecar before opening SQLite', t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('refresh', 'alpha');
+  const directory = dirname(fixture.registry);
+  const [index] = readdirSync(directory).filter(name => name.endsWith('.sqlite'));
+  const path = join(directory, `${index}-wal`);
+  const contents = 'unsafe sidecar fixture';
+  writeFileSync(path, contents, { mode: 0o600 });
+  execFileSync('setfacl', ['-m', 'u:65534:r--,m::---', path]);
+  assert.equal(statSync(path).mode & 0o077, 0);
+
+  const result = runWithEnv(fixture, process.env, 'refresh', 'alpha');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /index_unavailable/);
+  assert.ok(result.stderr.includes(path), result.stderr);
+  assert.equal(readFileSync(path, 'utf8'), contents);
+});
+
+linuxTest('Ubuntu rejects bind mounts as roots and skips them inside roots',
+  { skip: process.env.MARGIN_TEST_BIND_MOUNTS !== '1', timeout: 15000 }, async t => {
+    const fixture = setup(t);
+    const mountPoint = join(fixture.notes, 'bind');
+    mkdirSync(mountPoint);
+    writeFileSync(join(fixture.checkout, 'unrelated.md'), 'Outside the context root.\n');
+    execFileSync('sudo', ['-n', 'mount', '--bind', fixture.checkout, mountPoint]);
+    t.after(() => execFileSync('sudo', ['-n', 'umount', mountPoint]));
+
+    fixture.cli('register', 'alpha', fixture.checkout, fixture.notes);
+    fixture.cli('refresh', 'alpha');
+    const result = runWithEnv(fixture, process.env, 'add-checkout', 'alpha', 'extra', mountPoint);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /local ext4/);
+    assert.ok(result.stderr.includes(mountPoint), result.stderr);
+
+    const client = await connect(t, fixture);
+    const { sources } = await client.call('list_sources', { projectId: 'alpha' });
+    assert.deepEqual(sources.map(source => [source.rootId, source.relativePath]), [['code', 'unrelated.md']]);
+    const sourceId = Buffer.from(JSON.stringify(['alpha', 'notes', 'bind/unrelated.md'])).toString('base64url');
+    assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId }), { error: 'source_unavailable' });
+  });

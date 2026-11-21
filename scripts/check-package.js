@@ -11,6 +11,7 @@ assert.ok(process.argv[3] === undefined || process.argv[3] === '--candidate', 'U
 const tarball = resolve(process.argv[2]);
 const candidate = process.argv[3] === '--candidate';
 const windows = process.platform === 'win32';
+const macos = process.platform === 'darwin';
 const manifest = JSON.parse(execFileSync('tar', ['-xOzf', tarball, 'package/package.json'], {
   encoding: 'utf8'
 }));
@@ -26,11 +27,10 @@ const sources = readdirSync(new URL('../src/', import.meta.url));
 const compiledFiles = sources.filter(file => file.endsWith('.ts'))
   .map(file => `package/dist/${file.replace(/\.ts$/, '.js')}`);
 const files = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' }).trim().split(/\r?\n/);
-const macosAddon = 'package/dist/macos.node';
-const windowsAddon = 'package/dist/windows.node';
-const requiredAddon = windows ? windowsAddon : macosAddon;
-const otherAddon = windows ? macosAddon : windowsAddon;
-const optionalAddons = candidate && files.includes(otherAddon) ? [otherAddon] : [];
+const addons = { darwin: 'macos', win32: 'windows', linux: 'linux' };
+const requiredAddon = `package/dist/${addons[process.platform]}.node`;
+const optionalAddons = candidate ? Object.values(addons).map(name => `package/dist/${name}.node`)
+  .filter(path => path !== requiredAddon && files.includes(path)) : [];
 assert.deepEqual(files.sort(), [
   'package/README.md', 'package/package.json', requiredAddon, ...optionalAddons, ...compiledFiles
 ].sort());
@@ -61,17 +61,20 @@ try {
     });
     executable = process.execPath;
     args = [join(install, 'node_modules', '@jccrosby', 'margin', 'dist', 'margin.js'), ...registryArgs];
-    assert.equal(execFileSync(executable, [...args, 'register', 'smoke', checkout], {
-      cwd: work, env, encoding: 'utf8'
-    }).trim(), 'Registered smoke.');
   } else {
+    executable = 'npx';
+    args = ['--yes', '--package', tarball, '--', 'margin', ...registryArgs];
+  }
+  if (macos) {
     const pnpmArgs = ['dlx', '--reporter=silent', `--store-dir=${join(work, 'pnpm-store')}`, '--', tarball];
     const registration = execFileSync('pnpm', [...pnpmArgs, ...registryArgs, 'register', 'smoke', checkout], {
       cwd: work, encoding: 'utf8', env: { ...process.env, XDG_CACHE_HOME: join(work, 'pnpm-cache') }
     });
     assert.equal(registration.trim(), 'Registered smoke.');
-    executable = 'npx';
-    args = ['--yes', '--package', tarball, '--', 'margin', ...registryArgs];
+  } else {
+    assert.equal(execFileSync(executable, [...args, 'register', 'smoke', checkout], {
+      cwd: work, env, encoding: 'utf8'
+    }).trim(), 'Registered smoke.');
   }
   execFileSync(executable, [...args, 'add-checkout', 'smoke', 'extra', extra], { cwd: work, env });
   execFileSync(executable, [...args, 'refresh', 'smoke'], { cwd: work, env });

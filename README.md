@@ -3,12 +3,13 @@
 Margin lets Codex search and read your local project files. It works with Git checkouts and optional folders of notes. It can also save private project notes when you enable saves.
 
 - [Install and use Margin on Windows](docs/windows.md)
+- [Install and use Margin on Ubuntu](docs/ubuntu.md)
 - [Search, refresh, and add sources](docs/usage.md)
 - [Update or remove Margin](docs/manage-margin.md)
 
 ## Get access to Margin
 
-You need macOS 26 on Apple silicon, local APFS storage, Node.js 26, Git, and the Codex CLI. The examples use `npx`, which comes with npm.
+The following macOS examples need macOS 26 on Apple silicon and local APFS. They use Node.js 26, Git, Codex CLI, and `npx` from npm.
 
 The **package** is the downloadable copy of the Margin program. GitHub Packages hosts it at `https://npm.pkg.github.com`. Its name is `@jccrosby/margin`.
 

@@ -5,7 +5,13 @@ import { getSystemErrorName } from 'node:util';
 
 const require = createRequire(import.meta.url);
 export const windows = process.platform === 'win32';
-const addon = windows ? 'windows' : 'macos';
+const linux = process.platform === 'linux';
+export const localFilesystem = windows ? 'NTFS' : linux ? 'ext4' : 'APFS';
+const addon = windows ? 'windows' : linux ? 'linux' : 'macos';
+const macos = process.platform === 'darwin';
+if ((!windows && !linux && !macos) || process.arch !== (macos ? 'arm64' : 'x64')) {
+  throw new Error('Run Margin on macOS ARM64, Windows x64, or Ubuntu x64.');
+}
 const native = require(fileURLToPath(new URL(`../dist/${addon}.node`, import.meta.url))) as {
   verifyVolume(path: string): number;
   openDirectory(path: string): number;
