@@ -1097,7 +1097,7 @@ test('a fresh server can find a saved note through list, read, and both search m
     for (const mode of ['ranked', 'literal']) assert.deepEqual((await search('alpha', mode)).hits, []);
   });
 
-macTest('saved project notes survive export, index rebuild, and restore', { timeout: 15000 }, async t => {
+test('saved project notes survive export, index rebuild, and restore', { timeout: 15000 }, async t => {
   const fixture = setup(t);
   const projectId = 'alpha';
   fixture.cli('register', projectId, fixture.checkout, fixture.notes);
@@ -1140,11 +1140,11 @@ macTest('saved project notes survive export, index rebuild, and restore', { time
   });
   assert.match(originalNote.text, /# Private handoff\n\nCheck the moonstone playlist\.$/);
 
-  const backup = join(fixture.work, 'backup');
-  mkdirSync(backup, { mode: 0o700 });
-  const exported = join(backup, '.margin-saved-notes');
-  run(fixture.work, 'cp', '-pR', storage, exported);
-  assert.deepEqual(readFileSync(join(exported, relativePath)), originalFile);
+  const backup = join(registryDirectory, 'Notes backup 春');
+  fixture.cli('export-notes', backup);
+  const [exported] = readdirSync(backup, { recursive: true }).filter(path => path.endsWith('.md'));
+  assert.deepEqual(readFileSync(join(backup, exported)), originalFile);
+  assert.ok(!readdirSync(backup, { recursive: true }).some(path => path.includes('.sqlite')));
 
   const index = fixture.registry + '.' + createHash('sha256').update(projectId).digest('hex') + '.sqlite';
   const clearIndex = () => {
@@ -1170,12 +1170,65 @@ macTest('saved project notes survive export, index rebuild, and restore', { time
   await rebuilt.stop();
   clearIndex();
   rmSync(storage, { recursive: true });
-  run(fixture.work, 'cp', '-pR', exported, storage);
+  fixture.cli('restore-notes', backup);
   fixture.cli('refresh', 'beta');
   const restored = await verifyRebuild();
   assert.deepEqual((await list(restored, 'beta')).sources.map(source => source.relativePath), ['rollout.md']);
   assert.deepEqual(await read(restored, 'beta'), { error: 'source_unavailable' });
   for (const mode of modes) assert.deepEqual((await search(restored, 'beta', mode)).hits, []);
+});
+
+test('recovery refuses existing destinations and unsafe note files', { timeout: 15000 }, async t => {
+  const fixture = setup(t);
+  const projectId = 'alpha';
+  fixture.cli('register', projectId, fixture.checkout);
+  fixture.cli('note-saves', projectId, 'enable');
+  const client = await connect(t, fixture);
+  const { noteId } = await client.call('save_project_note', {
+    projectId, requestId: 'recovery-safety', title: 'Handoff', body: 'Preserve this note.'
+  });
+  assert.ok(noteId);
+  await client.stop();
+
+  const directory = dirname(fixture.registry);
+  const store = join(directory, '.margin-saved-notes');
+  const backup = join(directory, 'backup');
+  const [saved] = readdirSync(store, { recursive: true }).filter(path => path.endsWith('.md'));
+  const note = join(store, saved);
+  const original = readFileSync(note);
+  const reject = (command, path, error, location = path) => {
+    const result = runWithEnv(fixture, process.env, command, path);
+    assert.equal(result.status, 1, result.stdout);
+    assert.ok(result.stderr.includes(location), result.stderr);
+    assert.match(result.stderr, error);
+    return result.stderr;
+  };
+
+  reject('export-notes', join(fixture.checkout, 'backup'), /outside the source roots/);
+  const privateFix = windows ? /local NTFS/ : /0600/;
+  const sourceAlias = join(directory, 'source-alias');
+  linkSync(toNamespacedPath(note), sourceAlias);
+  assert.match(reject('export-notes', backup, /note_backup_unavailable/, note), privateFix);
+  assert.equal(existsSync(backup), false);
+  assert.deepEqual(readFileSync(note), original);
+  rmSync(sourceAlias);
+
+  fixture.cli('export-notes', backup);
+  reject('export-notes', backup, /note_backup_destination_exists/);
+  reject('restore-notes', backup, /note_backup_destination_exists/, store);
+  assert.deepEqual(readFileSync(note), original);
+
+  renameSync(store, join(directory, 'original-notes'));
+  const [relativeBackupNote] = readdirSync(backup, { recursive: true }).filter(path => path.endsWith('.md'));
+  const backupNote = join(backup, relativeBackupNote);
+  const backupAlias = join(directory, 'backup-alias');
+  linkSync(toNamespacedPath(backupNote), backupAlias);
+  assert.match(reject('restore-notes', backup, /note_backup_unavailable/, backupNote), privateFix);
+  assert.equal(existsSync(store), false);
+  assert.deepEqual(readFileSync(backupNote), original);
+  rmSync(backupAlias);
+  fixture.cli('restore-notes', backup);
+  assert.deepEqual(readFileSync(note), original);
 });
 
 test('retries recover a lost save response and concurrent calls never replace notes', { timeout: 15000 }, async t => {
@@ -1280,6 +1333,13 @@ syncBuiltinESMExports();
   const reader = await connect(t, fixture);
   const list = () => reader.call('list_sources', { projectId: 'alpha' });
   assert.deepEqual((await list()).sources, []);
+  const backup = join(dirname(fixture.registry), 'backup');
+  for (const command of ['export-notes', 'restore-notes']) {
+    const busy = runWithEnv(fixture, process.env, command, backup);
+    assert.equal(busy.status, 1);
+    assert.match(busy.stderr, /registry_busy/);
+    assert.equal(existsSync(backup), false);
+  }
   assert.deepEqual(await writer.stop('SIGKILL'), [null, 'SIGKILL']);
   assert.deepEqual((await list()).sources, []);
 
@@ -1308,6 +1368,9 @@ syncBuiltinESMExports();
   assert.deepEqual(await retry.stop('SIGKILL'), [null, 'SIGKILL']);
   assert.deepEqual(await reader.call('save_project_note', args), { noteId: sourceId, createdAt });
   assert.deepEqual((await list()).sources.map(source => source.sourceId), [sourceId]);
+  fixture.cli('export-notes', backup);
+  assert.equal(readdirSync(backup, { recursive: true }).filter(path => path.endsWith('.md')).length, 1);
+  assert.ok(!readdirSync(backup, { recursive: true }).some(path => path.endsWith('.tmp')));
 });
 
 test('saves reject long lines before writing and accept the read limit', { timeout: 10000 }, async t => {
@@ -1334,7 +1397,7 @@ test('saves reject long lines before writing and accept the read limit', { timeo
   }
 });
 
-test('two registries can save the same project ID and request ID independently', { timeout: 10000 }, async t => {
+test('two registries save and recover notes independently', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   const second = { ...fixture, registry: join(dirname(fixture.registry), 'other.json') };
   const register = ['register', 'alpha', fixture.checkout, fixture.notes];
@@ -1355,6 +1418,24 @@ test('two registries can save the same project ID and request ID independently',
     assert.deepEqual(await client.call('read_source', { projectId: 'alpha', sourceId: foreignId }),
       { error: 'source_unavailable' });
   }
+  const directory = dirname(fixture.registry);
+  const backup = join(directory, 'first-backup');
+  fixture.cli('export-notes', backup);
+  assert.equal(readdirSync(backup, { recursive: true }).filter(path => path.endsWith('.md')).length, 1);
+  const store = join(directory, '.margin-saved-notes', createHash('sha256').update(basename(fixture.registry)).digest('hex'));
+  renameSync(store, join(directory, 'first-store'));
+  const third = { ...fixture, registry: join(directory, 'third.json') };
+  run(third.work, process.execPath, entry, '--registry', third.registry, ...register);
+  const wrongRegistry = runWithEnv(third, process.env, 'restore-notes', backup);
+  assert.equal(wrongRegistry.status, 1);
+  assert.match(wrongRegistry.stderr, /Use the original registry path/);
+  assert.ok(wrongRegistry.stderr.includes(JSON.stringify(fixture.registry)), wrongRegistry.stderr);
+  fixture.cli('restore-notes', backup);
+  const [firstSources, secondSources] = await Promise.all([
+    firstClient.call('list_sources', { projectId: 'alpha' }), secondClient.call('list_sources', { projectId: 'alpha' })
+  ]);
+  assert.deepEqual(firstSources.sources.map(source => source.sourceId), [first.noteId]);
+  assert.deepEqual(secondSources.sources.map(source => source.sourceId), [other.noteId]);
 });
 
 test('a save can finish when the cold index briefly reports a busy journal', { timeout: 10000 }, async t => {
@@ -1902,6 +1983,7 @@ linuxTest('Ubuntu refuses inheritable ACLs before writing registry changes', t =
   fixture.cli('register', 'alpha', fixture.checkout);
   const before = readFileSync(fixture.registry);
   const parent = dirname(fixture.registry);
+  const files = readdirSync(parent);
   execFileSync('setfacl', ['-m', 'd:u:65534:r-x', parent]);
   assert.equal(statSync(parent).mode & 0o077, 0);
 
@@ -1910,7 +1992,7 @@ linuxTest('Ubuntu refuses inheritable ACLs before writing registry changes', t =
   assert.match(result.stderr, /registry_unavailable/);
   assert.ok(result.stderr.includes(parent));
   assert.deepEqual(readFileSync(fixture.registry), before);
-  assert.deepEqual(readdirSync(parent), [basename(fixture.registry)]);
+  assert.deepEqual(readdirSync(parent), files);
 });
 
 linuxTest('Ubuntu refuses an ACL on an owner-only SQLite sidecar before opening SQLite', t => {

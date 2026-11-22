@@ -32,19 +32,21 @@ const metadataSchema = z.strictObject({
   citations: noteCitations
 });
 
+export function savedNoteStore(registry: string) {
+  return join(dirname(registry), savedNotesDirectory, contentHash(basename(registry)));
+}
+
 export function savedNoteRoot(registryPath: string, projectId: string, allRoots: Root[], create = false): Root | undefined {
   const registry = registryLocation(registryPath);
   const parent = dirname(registry);
-  const scope = [savedNotesDirectory, contentHash(basename(registry)), contentHash(projectId)];
-  const location = join(parent, ...scope);
+  const store = savedNoteStore(registry);
+  const location = join(store, contentHash(projectId));
   try {
     checkOutsideRoots(location, allRoots, 'saved notes directory');
     requirePrivateDirectory(parent);
-    let directory = parent;
-    for (const segment of scope) {
-      directory = join(directory, segment);
-      requirePrivateDirectory(directory, create);
-    }
+    requirePrivateDirectory(dirname(store), create);
+    requirePrivateDirectory(store, create);
+    requirePrivateDirectory(location, create);
     return { id: savedNotesId, kind: 'context', path: location };
   } catch (error) {
     if (!create && isMissing(error)) return undefined;

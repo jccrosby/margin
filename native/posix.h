@@ -7,6 +7,7 @@
 #include <node_api.h>
 #include <stdbool.h>
 #include <string.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 static napi_value number(napi_env env, int n) {
@@ -59,6 +60,22 @@ static napi_value entries(napi_env env, napi_callback_info info) {
     napi_set_element(env, item, 1, type);
     napi_set_element(env, result, index++, item);
   }
+}
+
+static napi_value file_lock(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2], result;
+  int fd, operation;
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+  if (argc != 2 || napi_get_value_int32(env, args[0], &fd) != napi_ok ||
+      napi_get_value_int32(env, args[1], &operation) != napi_ok || operation < 0 || operation > 2) {
+    return number(env, -EINVAL);
+  }
+  int flags = operation == 0 ? LOCK_UN : operation == 1 ? LOCK_SH | LOCK_NB : LOCK_EX | LOCK_NB;
+  bool locked = flock(fd, flags) == 0;
+  if (!locked && errno != EWOULDBLOCK) return number(env, -errno);
+  napi_get_boolean(env, locked, &result);
+  return result;
 }
 
 static napi_value change_directory(napi_env env, napi_callback_info info) {

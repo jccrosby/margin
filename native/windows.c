@@ -428,6 +428,23 @@ static napi_value create_private_directory(napi_env env, napi_callback_info info
   return CreateDirectoryW(path, &attributes) ? integer(env, 0) : error(env);
 }
 
+static napi_value file_lock(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2], result;
+  int operation;
+  napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+  if (argc != 2 || napi_get_value_int32(env, args[1], &operation) != napi_ok || operation < 0 || operation > 2) {
+    return integer(env, -ERROR_INVALID_PARAMETER);
+  }
+  HANDLE file = handle_arg(env, args[0]);
+  OVERLAPPED position = { 0 };
+  DWORD flags = LOCKFILE_FAIL_IMMEDIATELY | (operation == 2 ? LOCKFILE_EXCLUSIVE_LOCK : 0);
+  BOOL locked = operation == 0 ? UnlockFileEx(file, 0, 1, 0, &position) : LockFileEx(file, flags, 0, 1, 0, &position);
+  if (!locked && GetLastError() != ERROR_LOCK_VIOLATION) return error(env);
+  napi_get_boolean(env, locked != FALSE, &result);
+  return result;
+}
+
 static napi_value publish(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value args[2];
@@ -453,6 +470,7 @@ NAPI_MODULE_INIT() {
     { .utf8name = "entryPath", .method = entry_path },
     { .utf8name = "privateAccess", .method = private_access },
     { .utf8name = "createPrivateDirectory", .method = create_private_directory },
+    { .utf8name = "fileLock", .method = file_lock },
     { .utf8name = "publish", .method = publish }
   };
   napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);
