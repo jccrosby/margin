@@ -66,9 +66,11 @@ try {
     args = ['--yes', '--package', tarball, '--', 'margin', ...registryArgs];
   }
   if (macos) {
-    const pnpmArgs = ['dlx', '--reporter=silent', `--store-dir=${join(work, 'pnpm-store')}`, '--', tarball];
+    const pnpmArgs = ['dlx', '--reporter=silent', '--', tarball];
     const registration = execFileSync('pnpm', [...pnpmArgs, ...registryArgs, 'register', 'smoke', checkout], {
-      cwd: work, encoding: 'utf8', env: { ...process.env, XDG_CACHE_HOME: join(work, 'pnpm-cache') }
+      cwd: work, encoding: 'utf8', env: {
+        ...process.env, PNPM_CONFIG_STORE_DIR: join(work, 'pnpm-store'), XDG_CACHE_HOME: join(work, 'pnpm-cache')
+      }
     });
     assert.equal(registration.trim(), 'Registered smoke.');
   } else {
