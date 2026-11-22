@@ -1,9 +1,10 @@
 import { fstatSync } from 'node:fs';
-import { basename, extname, sep } from 'node:path';
+import { basename, extname, join, sep } from 'node:path';
 import { evidenceFormat } from './evidence.ts';
 import { git, requireGitCheckout } from './git.ts';
 import { isWindowsPathSegment, readEntries, requirePrivateAccess, windows, withDirectory, withEntry } from './filesystem.ts';
-import { MarginError, type Root } from './registry.ts';
+import { MarginError, unsafeStorage, type Root } from './registry.ts';
+import { isMissing } from './storage.ts';
 
 export const savedNotesDirectory = '.margin-saved-notes';
 export const savedNotesId = '@saved-notes';
@@ -97,6 +98,12 @@ function* contextPaths(root: Root, fd: number): Generator<string> {
   }
 }
 
+function unavailableRoot(root: Root) {
+  return root.id === savedNotesId
+    ? unsafeStorage('root_unavailable', root.path)
+    : new MarginError('root_unavailable');
+}
+
 function verifyRootPath(root: Root, fd: number) {
   try {
     withDirectory(root.path, current => {
@@ -105,7 +112,7 @@ function verifyRootPath(root: Root, fd: number) {
       if (original.dev !== actual.dev || original.ino !== actual.ino) throw new Error('The root moved.');
     });
   } catch {
-    throw new MarginError('root_unavailable');
+    throw unavailableRoot(root);
   }
 }
 
@@ -126,7 +133,7 @@ function withRoot<T>(root: Root, use: (fd: number) => T) {
     });
   } catch (error) {
     if (verified) throw error;
-    throw new MarginError('root_unavailable');
+    throw unavailableRoot(root);
   }
 }
 
@@ -143,7 +150,14 @@ function useEntry<T>(root: Root, fd: number, relativePath: string, use: (fd: num
   }, windows || root.kind === 'context');
 }
 
-type SourceInventory = { paths: string[]; unreadable: string[] };
+function noteAccessError(root: Root, relativePath: string, error: unknown) {
+  if (root.id === savedNotesId && !isMissing(error)) {
+    return unsafeStorage('note_storage_unavailable', join(root.path, relativePath));
+  }
+}
+
+type SourceGap = { error: string; relativePath: string; detail?: string };
+type SourceInventory = { paths: string[]; unreadable: SourceGap[] };
 export type SourceReader = <T>(path: string, use: (fd: number) => T) => T;
 
 export function withInventory<T>(root: Root,
@@ -153,14 +167,17 @@ export function withInventory<T>(root: Root,
     function scan(): SourceInventory {
       const paths = root.kind === 'git' ? gitPaths(fd) : contextPaths(root, fd);
       const eligible: string[] = [];
-      const unreadable: string[] = [];
+      const unreadable: SourceGap[] = [];
       for (const path of paths) {
         if (!isSourcePath(path)) continue;
         try {
           useEntry(root, fd, path, () => eligible.push(path));
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
-          if (root.id === savedNotesId || code === 'EACCES' || code === 'EPERM') unreadable.push(path);
+          if (root.id === savedNotesId || code === 'EACCES' || code === 'EPERM') {
+            const issue = noteAccessError(root, path, error);
+            unreadable.push({ error: issue?.message ?? 'source_unavailable', relativePath: path, detail: issue?.detail });
+          }
         }
       }
       verifyRootPath(root, fd);
@@ -182,11 +199,16 @@ export function scanPaths(root: Root) {
 }
 
 function readSource<T>(root: Root, fd: number, path: string, read: (fd: number) => T) {
+  let verified = false;
   try {
-    return useEntry(root, fd, path, read);
+    return useEntry(root, fd, path, source => {
+      verified = true;
+      return read(source);
+    });
   } catch (error) {
     if (error instanceof MarginError) throw error;
-    throw new MarginError('source_unavailable');
+    const issue = verified ? undefined : noteAccessError(root, path, error);
+    throw issue ?? new MarginError('source_unavailable');
   }
 }
 

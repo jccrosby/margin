@@ -4,7 +4,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, toNamespacedPath } from 'node:path';
 import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -1235,52 +1235,79 @@ test('retries recover a lost save response and concurrent calls never replace no
   assert.notEqual(firstSaves[0].noteId, firstSaves[1].noteId);
 });
 
-macTest('an interrupted save exposes no partial Markdown file', { timeout: 15000 }, async t => {
+test('readers see only complete single-link notes during publication', { timeout: 25000 }, async t => {
   const fixture = setup(t);
   fixture.cli('register', 'alpha', fixture.checkout);
   fixture.cli('note-saves', 'alpha', 'enable');
-  const marker = join(fixture.work, 'save-staged');
+  const staged = join(fixture.work, 'save-staged');
+  const release = join(fixture.work, 'release-staged');
+  const published = join(fixture.work, 'save-published');
   const hook = join(fixture.work, 'pause.mjs');
   writeFileSync(hook, `import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 const write = fs.writeFileSync;
+const remove = fs.rmSync;
+const waiter = new Int32Array(new SharedArrayBuffer(4));
 fs.writeFileSync = (destination, data, options) => {
   if (typeof data === 'string' && data.includes('frozencaribou')) {
     write(destination, data.slice(0, data.length / 2), options);
-    write(${JSON.stringify(marker)}, '');
-    process.kill(process.pid, 'SIGSTOP');
+    write(${JSON.stringify(staged)}, '');
+    while (!fs.existsSync(${JSON.stringify(release)})) {
+      Atomics.wait(waiter, 0, 0, 10);
+    }
+    return write(destination, data.slice(data.length / 2), options);
   }
   return write(destination, data, options);
 };
+fs.rmSync = (path, options) => {
+  if (typeof path === 'string' && path.endsWith('.tmp')) {
+    write(${JSON.stringify(published)}, '');
+    Atomics.wait(waiter, 0, 0);
+  }
+  return remove(path, options);
+};
 syncBuiltinESMExports();
 `);
-  const writer = await connect(t, { ...fixture, nodeArgs: ['--import', pathToFileURL(hook).href] });
+  async function waitFor(path) {
+    for (let attempt = 0; !existsSync(path) && attempt < 200; attempt++) await delay(25);
+    assert.ok(existsSync(path), `The server did not reach ${basename(path)}`);
+  }
+  const startWriter = () => connect(t, { ...fixture, nodeArgs: ['--import', pathToFileURL(hook).href] });
   const args = { projectId: 'alpha', requestId: 'interrupt', title: 'Handoff', body: 'frozencaribou' };
+  const writer = await startWriter();
   writer.sendCall('save_project_note', args);
-  for (let attempt = 0; !existsSync(marker) && attempt < 100; attempt++) await delay(25);
-  assert.ok(existsSync(marker), 'The server did not reach the interrupted write');
+  await waitFor(staged);
   const reader = await connect(t, fixture);
   const list = () => reader.call('list_sources', { projectId: 'alpha' });
   assert.deepEqual((await list()).sources, []);
-  const [, signal] = await writer.stop('SIGKILL');
-  assert.equal(signal, 'SIGKILL');
+  assert.deepEqual(await writer.stop('SIGKILL'), [null, 'SIGKILL']);
   assert.deepEqual((await list()).sources, []);
-  assert.equal(readdirSync(dirname(fixture.registry), { recursive: true }).filter(path => path.endsWith('.md')).length, 0);
 
-  const saved = await reader.call('save_project_note', args);
-  assert.deepEqual((await list()).sources.map(source => source.sourceId), [saved.noteId]);
+  rmSync(staged);
+  const retry = await startWriter();
+  retry.sendCall('save_project_note', args);
+  await waitFor(staged);
+  writeFileSync(release, '');
+  await waitFor(published);
   const privateDir = dirname(fixture.registry);
   const [relativePath] = readdirSync(privateDir, { recursive: true }).filter(path => path.endsWith('.md'));
   assert.ok(relativePath);
   const path = join(privateDir, relativePath);
-  let privatePath = path;
-  while (privatePath !== privateDir) {
-    const { mode, uid } = statSync(privatePath);
-    assert.equal(mode & 0o077, 0);
-    assert.equal(uid, process.getuid());
-    privatePath = dirname(privatePath);
+  assert.equal(statSync(path).nlink, 1);
+  const [{ sourceId }] = (await list()).sources;
+  const { text } = await reader.call('read_source', { projectId: 'alpha', sourceId });
+  assert.match(text, /\n# Handoff\n\nfrozencaribou$/);
+  const { createdAt } = JSON.parse(text.split('\n')[1]);
+  if (!windows) {
+    for (let location = path; location !== privateDir; location = dirname(location)) {
+      const { mode, uid } = statSync(location);
+      assert.equal(mode & 0o077, 0);
+      assert.equal(uid, process.getuid());
+    }
   }
-  assert.match(readFileSync(path, 'utf8'), /\nfrozencaribou$/);
+  assert.deepEqual(await retry.stop('SIGKILL'), [null, 'SIGKILL']);
+  assert.deepEqual(await reader.call('save_project_note', args), { noteId: sourceId, createdAt });
+  assert.deepEqual((await list()).sources.map(source => source.sourceId), [sourceId]);
 });
 
 test('saves reject long lines before writing and accept the read limit', { timeout: 10000 }, async t => {
@@ -1414,7 +1441,52 @@ test('a matching save retry restores search for a committed note', { timeout: 10
     .map(path => basename(path)), [saved.relativePath]);
 });
 
-macTest('unsafe saved note storage leaves ordinary sources discoverable', { timeout: 10000 }, async t => {
+test('unsafe saved note files block reads and retries without changing the note', { timeout: 10000 }, async t => {
+  const fixture = setup(t);
+  fixture.cli('register', 'alpha', fixture.checkout);
+  fixture.cli('note-saves', 'alpha', 'enable');
+  const client = await connect(t, fixture);
+  const args = { projectId: 'alpha', requestId: 'unsafe-note', title: 'Handoff', body: 'Preserve finchmarker.' };
+  const { noteId } = await client.call('save_project_note', args);
+  assert.ok(noteId);
+  const directory = dirname(fixture.registry);
+  const [note] = readdirSync(directory, { recursive: true }).filter(path => path.endsWith('.md'));
+  const path = join(directory, note);
+  const before = readFileSync(path);
+  if (windows) {
+    // Give icacls a short path. Remove the alias before checking the note.
+    const alias = join(directory, 'acl.md');
+    linkSync(toNamespacedPath(path), alias);
+    try {
+      execFileSync('icacls.exe', [alias, '/grant', '*S-1-1-0:R']);
+    } finally {
+      rmSync(alias);
+    }
+    assert.equal(statSync(path).nlink, 1);
+  } else if (linux) {
+    execFileSync('setfacl', ['-m', 'u:65534:r--,m::---', path]);
+  } else {
+    execFileSync('/bin/chmod', ['+a', 'everyone allow read', path]);
+  }
+
+  const read = await client.call('read_source', { projectId: 'alpha', sourceId: noteId });
+  const retry = await client.call('save_project_note', args);
+  for (const result of [read, retry]) {
+    assert.equal(result.error, 'note_storage_unavailable');
+    assert.ok(result.detail.includes(path));
+    assert.match(result.detail, windows ? /NTFS/ : /0600/);
+  }
+  assert.deepEqual((await client.call('list_sources', { projectId: 'alpha' })).sources, []);
+  for (const mode of ['ranked', 'literal']) {
+    const { hits, coverage } = await client.call('search_project', { projectId: 'alpha', query: 'finchmarker', mode });
+    assert.deepEqual(hits, []);
+    const [gap] = coverage.roots.find(root => root.rootId === '@saved-notes').gaps;
+    assert.deepEqual(gap, { error: read.error, detail: read.detail, relativePath: basename(path) });
+  }
+  assert.deepEqual(readFileSync(path), before);
+});
+
+test('unsafe saved note storage leaves ordinary sources discoverable', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   fixture.cli('register', 'alpha', fixture.checkout);
   fixture.cli('note-saves', 'alpha', 'enable');
@@ -1425,7 +1497,14 @@ macTest('unsafe saved note storage leaves ordinary sources discoverable', { time
     { projectId: 'alpha', requestId: 'hidden', title: 'Private handoff', body: 'Find sharedmarker in this note.' });
   assert.ok(noteId);
   const noteDirectory = join(dirname(fixture.registry), '.margin-saved-notes');
-  chmodSync(noteDirectory, 0o755);
+  const before = readdirSync(noteDirectory, { recursive: true });
+  if (windows) execFileSync('icacls.exe', [noteDirectory, '/grant', '*S-1-1-0:RX']);
+  else chmodSync(noteDirectory, 0o755);
+  const denied = await client.call('save_project_note',
+    { projectId: 'alpha', requestId: 'blocked', title: 'New note', body: 'Do not write this.' });
+  assert.equal(denied.error, 'note_storage_unavailable');
+  assert.ok(denied.detail.includes(noteDirectory));
+  assert.deepEqual(readdirSync(noteDirectory, { recursive: true }), before);
 
   const listing = await client.call('list_sources', { projectId: 'alpha' });
   assert.deepEqual(listing.sources?.map(source => source.relativePath), ['ordinary.md'], JSON.stringify(listing));
@@ -1433,7 +1512,7 @@ macTest('unsafe saved note storage leaves ordinary sources discoverable', { time
   assert.equal(warning.rootId, '@saved-notes');
   assert.equal(warning.error, 'root_unavailable');
   assert.ok(warning.detail?.includes(noteDirectory));
-  assert.match(warning.detail, /0700/);
+  assert.match(warning.detail, windows ? /NTFS/ : /0700/);
   assert.equal(listing.coverage.complete, false);
   for (const mode of ['ranked', 'literal']) {
     const result = await client.call('search_project', { projectId: 'alpha', query: 'sharedmarker', mode });

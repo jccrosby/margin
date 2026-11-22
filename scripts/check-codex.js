@@ -115,40 +115,57 @@ try {
   const codex = process.argv[3] ?? 'codex';
   const useNode = windows && codex.endsWith('.js');
   const appServer = ['app-server', ...settings];
-  const child = spawn(useNode ? process.execPath : codex, useNode ? [codex, ...appServer] : appServer, {
-    cwd: checkout, env, stdio: ['pipe', 'pipe', 'inherit'], signal: AbortSignal.timeout(45_000)
-  });
-  const exited = once(child, 'close');
-  void exited.catch(() => {});
-  const lines = createInterface({ input: child.stdout });
-  const replies = lines[Symbol.asyncIterator]();
-  let sequence = 0;
-  const send = message => child.stdin.write(JSON.stringify(message) + '\n');
-  async function request(method, params) {
-    const id = ++sequence;
-    send({ jsonrpc: '2.0', id, method, params });
-    for (;;) {
-      const { value } = await replies.next();
-      assert.ok(value, `Codex exited before replying to ${method}.`);
-      const reply = JSON.parse(value);
-      if (reply.id !== id) continue;
-      assert.ok(!reply.error, JSON.stringify(reply.error));
-      return reply.result;
+  async function inFreshCodexThread(run) {
+    const child = spawn(useNode ? process.execPath : codex, useNode ? [codex, ...appServer] : appServer, {
+      cwd: checkout, env, stdio: ['pipe', 'pipe', 'inherit'], signal: AbortSignal.timeout(45_000)
+    });
+    const exited = once(child, 'close');
+    void exited.catch(() => {});
+    const lines = createInterface({ input: child.stdout });
+    const replies = lines[Symbol.asyncIterator]();
+    let sequence = 0;
+    const send = message => child.stdin.write(JSON.stringify(message) + '\n');
+    async function request(method, params) {
+      const id = ++sequence;
+      send({ jsonrpc: '2.0', id, method, params });
+      for (;;) {
+        const { value } = await replies.next();
+        assert.ok(value, `Codex exited before replying to ${method}.`);
+        const reply = JSON.parse(value);
+        if (reply.id !== id) continue;
+        assert.ok(!reply.error, JSON.stringify(reply.error));
+        return reply.result;
+      }
+    }
+
+    try {
+      await request('initialize', { clientInfo: { name: 'margin-package-check', version: '1' } });
+      send({ jsonrpc: '2.0', method: 'initialized' });
+      const { thread } = await request('thread/start', { cwd: checkout, ephemeral: true });
+      const callResult = async (tool, args, error) => {
+        const reply = await request('mcpServer/tool/call', { threadId: thread.id, server: 'margin', tool, arguments: args });
+        assert.equal(Boolean(reply.isError), Boolean(error), JSON.stringify(reply));
+        if (error) assert.deepEqual(reply.structuredContent, { error });
+        return reply;
+      };
+      const call = async (...args) => (await callResult(...args)).structuredContent;
+      return await run(call, callResult);
+    } finally {
+      lines.close();
+      child.stdin.end();
+      const stop = setTimeout(() => child.kill(), 1000);
+      try {
+        await exited;
+      } finally {
+        clearTimeout(stop);
+      }
     }
   }
 
-  try {
-    await request('initialize', { clientInfo: { name: 'margin-package-check', version: '1' } });
-    send({ jsonrpc: '2.0', method: 'initialized' });
-    const { thread } = await request('thread/start', { cwd: checkout, ephemeral: true });
-    const callResult = async (tool, args, error) => {
-      const reply = await request('mcpServer/tool/call', { threadId: thread.id, server: 'margin', tool, arguments: args });
-      assert.equal(Boolean(reply.isError), Boolean(error), JSON.stringify(reply));
-      if (error) assert.deepEqual(reply.structuredContent, { error });
-      return reply;
-    };
-    const call = async (...args) => (await callResult(...args)).structuredContent;
-    const projectId = 'demo';
+  const projectId = 'demo';
+  const noteBody = 'The amber ledger belongs to this project.';
+  const note = { projectId, requestId: 'ledger-note', title: 'Ledger', body: noteBody };
+  const { saved, cited } = await inFreshCodexThread(async (call, callResult) => {
     assert.deepEqual((await call('list_projects', {})).projects.map(project => project.projectId), ['demo', 'private']);
     const { sources } = await call('list_sources', { projectId });
     const expected = [['code', 'café.md'], ['extra', 'extra.md']];
@@ -167,14 +184,11 @@ try {
     assert.deepEqual(ranked.map(hit => hit.sourceId), [sourceId]);
     assert.deepEqual(literal.map(hit => hit.sourceId), [sourceId]);
     const [{ contentHash, startLine, endLine, text: excerpt }] = ranked;
-    const citation = { projectId, sourceId, contentHash, location: { startLine, endLine } };
+    const cited = { sourceId, contentHash, location: { startLine, endLine } };
+    const citation = { projectId, ...cited };
     const opened = await call('open_evidence', citation);
     assert.equal(opened.contentHash, contentHash);
     assert.equal(opened.text, excerpt);
-    writeFileSync(source, 'The new checklist has no birds.\n');
-    assert.deepEqual((await search('ranked')).hits, []);
-    assert.deepEqual((await search('literal')).hits, []);
-    await call('open_evidence', citation, 'stale_citation');
     console.log('A fresh Codex thread read project text, searched both modes, and reopened matching evidence.');
     if (extractors) {
       for (const [file, query, kind] of media) {
@@ -218,16 +232,42 @@ try {
       assert.equal((await call('open_evidence', { projectId, sourceId: link.sourceId })).text, responseText);
       console.log('The Codex thread reopened approved HTTPS evidence and rejected a stale citation.');
     }
-  } finally {
-    lines.close();
-    child.stdin.end();
-    const stop = setTimeout(() => child.kill(), 1000);
-    try {
-      await exited;
-    } finally {
-      clearTimeout(stop);
+    await call('save_project_note', note, 'note_saves_disabled');
+    margin('note-saves', projectId, 'enable');
+    const saved = await call('save_project_note', { ...note, citations: [cited] });
+    assert.ok(saved.noteId, JSON.stringify(saved));
+    assert.equal(saved.createdAt, new Date(saved.createdAt).toISOString());
+    return { saved, cited };
+  });
+
+  await inFreshCodexThread(async call => {
+    const { sources } = await call('list_sources', { projectId });
+    assert.deepEqual(sources.filter(source => source.rootId === '@saved-notes').map(source => source.sourceId),
+      [saved.noteId]);
+    const { text } = await call('read_source', { projectId, sourceId: saved.noteId });
+    assert.ok(text.endsWith(`# Ledger\n\n${noteBody}`));
+    const { citations } = JSON.parse(text.split('\n')[1]);
+    assert.deepEqual(citations, [cited]);
+    const citation = { projectId, ...citations[0] };
+    assert.equal((await call('open_evidence', citation)).contentHash, cited.contentHash);
+    await call('read_source', { projectId: 'private', sourceId: saved.noteId }, 'source_unavailable');
+
+    for (const mode of ['ranked', 'literal']) {
+      const search = async (projectId, query) => (await call('search_project', { projectId, query, mode })).hits;
+      assert.deepEqual((await search(projectId, noteBody)).map(hit => hit.sourceId), [saved.noteId]);
+      assert.deepEqual(await search('private', noteBody), []);
     }
-  }
+    assert.deepEqual(await call('save_project_note', { ...note, citations: [cited] }), saved);
+    console.log('A restarted Codex session found the private note, reopened its citation, and recovered the same save.');
+
+    writeFileSync(source, 'The new checklist has no birds.\n');
+    for (const mode of ['ranked', 'literal']) {
+      const { hits } = await call('search_project', { projectId, query: 'maple owls are ready', mode });
+      assert.deepEqual(hits, []);
+    }
+    await call('open_evidence', citation, 'stale_citation');
+  });
+
 } finally {
   server?.close();
   rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

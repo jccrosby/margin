@@ -78,10 +78,12 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
     root, relativePath, noteId, createdAt: existingNote(root, relativePath, args, noteId)
   });
 
+  let location = dirname(registry);
   try {
     const existingRoot = savedNoteRoot(registry, args.projectId, allRoots);
-    if (existingRoot && lstatSync(join(existingRoot.path, relativePath), { throwIfNoEntry: false })) {
-      return reuse(existingRoot);
+    if (existingRoot) {
+      location = join(existingRoot.path, relativePath);
+      if (lstatSync(location, { throwIfNoEntry: false })) return reuse(existingRoot);
     }
     const createdAt = new Date().toISOString();
     const text = noteMarkdown(args, noteId, createdAt);
@@ -90,6 +92,7 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
     const root = existingRoot ?? savedNoteRoot(registry, args.projectId, allRoots, true)!;
     const path = join(root.path, relativePath);
     const staged = join(root.path, `${randomUUID()}.tmp`);
+    location = staged;
     try {
       const fd = openSync(staged, 'wx+', 0o600);
       try {
@@ -100,6 +103,7 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
         closeSync(fd);
       }
       // Publish without overwriting another save or creating a second hard link.
+      location = path;
       try {
         publishExclusive(staged, path);
       } catch (error) {
@@ -113,6 +117,6 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
     }
   } catch (error) {
     if (error instanceof MarginError) throw error;
-    throw unsafeStorage('note_storage_unavailable', dirname(registry));
+    throw unsafeStorage('note_storage_unavailable', (error as NodeJS.ErrnoException).path ?? location);
   }
 }
