@@ -161,6 +161,7 @@ NAPI_MODULE_INIT() {
     { .utf8name = "privateAccess", .method = private_access },
     { .utf8name = "entryPath", .method = entry_path },
     { .utf8name = "changeDirectory", .method = change_directory },
+    { .utf8name = "fileLock", .method = file_lock },
     { .utf8name = "publish", .method = publish }
   };
   napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);

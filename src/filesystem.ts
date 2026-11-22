@@ -21,6 +21,7 @@ const native = require(fileURLToPath(new URL(`../dist/${addon}.node`, import.met
   entryPath(fd: number): string | number;
   createPrivateDirectory(path: string): number;
   changeDirectory(fd: number): number;
+  fileLock(fd: number, operation: number): boolean | number;
   publish(from: string, to: string): number;
 };
 
@@ -69,10 +70,14 @@ export function withDirectory<T>(path: string, use: (fd: number) => T): T {
   }
 }
 
+export function openEntry(directory: number, path: string, isDirectory: boolean, exact = false) {
+  return check(native.openEntry(directory, path, isDirectory, exact));
+}
+
 export function withEntry<T>(directory: number, path: string, isDirectory: boolean, use: (fd: number) => T,
   exact = false
 ): T {
-  const fd = check(native.openEntry(directory, path, isDirectory, exact));
+  const fd = openEntry(directory, path, isDirectory, exact);
   try {
     return use(fd);
   } finally {
@@ -94,6 +99,17 @@ export function entryPath(fd: number) {
 
 export function requirePrivateAccess(fd: number, ancestor = false) {
   if (native.privateAccess(fd, ancestor) !== true) throw new Error('Unsafe permissions, ownership, or ACL.');
+}
+
+const fileLockOperation = { unlock: 0, shared: 1, exclusive: 2 } as const;
+
+export function tryFileLock(fd: number, mode: 'shared' | 'exclusive') {
+  const result = native.fileLock(fd, fileLockOperation[mode]);
+  return typeof result === 'number' ? fail(result) : result;
+}
+
+export function unlockFile(fd: number) {
+  native.fileLock(fd, fileLockOperation.unlock);
 }
 
 export function publishExclusive(from: string, to: string) {

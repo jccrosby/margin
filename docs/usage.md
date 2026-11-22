@@ -84,30 +84,36 @@ Margin stores Markdown files under `.margin-saved-notes` beside the registry. Ea
 
 ## Export and restore saved project notes
 
-Stop Margin servers and refreshes that use the registry before you copy or restore notes. If you chose a custom projects path, replace the example path in the commands.
+Close Codex sessions that use the registry. Wait for any Margin commands that use it to finish. If Margin reports a busy registry, retry after the other command ends.
 
-Copy the whole `.margin-saved-notes` directory to a private backup. Keep its directory structure, filenames, and permissions. The Markdown files include note metadata and any citations.
+Export to a new directory inside an existing private folder. Keep the backup outside all registered source folders. The backup contains note files, metadata, and citations. Keep the original `projects.json` separately.
 
-```sh
-margin_backup=/absolute/path/to/a/new/backup-directory
-margin_registry_file="$(realpath "$HOME/Library/Application Support/Margin/projects.json")" &&
-  margin_saved_notes="$(dirname "$margin_registry_file")/.margin-saved-notes" &&
-  mkdir -m 700 "$margin_backup" &&
-  cp -pR "$margin_saved_notes" "$margin_backup"
-```
-
-To restore a missing notes directory, use the original registry path and project IDs. Keep directories at mode `0700` and files at mode `0600`.
+On macOS or Ubuntu, use your registry path and package version in these commands.
 
 ```sh
-margin_backup=/absolute/path/to/the/backup-directory
-margin_registry_file="$(realpath "$HOME/Library/Application Support/Margin/projects.json")" &&
-  margin_saved_notes="$(dirname "$margin_registry_file")/.margin-saved-notes" &&
-  test ! -e "$margin_saved_notes" &&
-  test ! -L "$margin_saved_notes" &&
-  cp -pR "$margin_backup/.margin-saved-notes" "$margin_saved_notes"
+margin_registry="$HOME/Library/Application Support/Margin/projects.json"
+margin_backup="$(dirname "$margin_registry")/Notes backup"
+npx --yes @jccrosby/margin@0.1.0 --registry "$margin_registry" export-notes "$margin_backup"
 ```
 
-Run `refresh` for each restored project. Refresh reads the saved notes even when the project has saves disabled.
+On Windows, use `$node`, `$entry`, and `$registry` from the [PowerShell setup](windows.md#install-and-register-a-project).
+
+```powershell
+$backup = Join-Path (Split-Path -Parent $registry) 'Notes backup'
+& $node $entry --registry $registry export-notes $backup
+```
+
+To recover a missing note store, use the original registry path and project IDs. Restore stops if the store already exists. Leave the backup files and directories in place.
+
+```sh
+npx --yes @jccrosby/margin@0.1.0 --registry "$margin_registry" restore-notes "$margin_backup"
+```
+
+```powershell
+& $node $entry --registry $registry restore-notes $backup
+```
+
+Run `refresh` for each restored project to rebuild search from the notes. Refresh also reads notes when the project has saves disabled. Start a fresh Codex session, then read and search for a restored note.
 
 ## Tools
 

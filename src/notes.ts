@@ -1,15 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import {
-  closeSync, fsyncSync, lstatSync, openSync, rmSync, writeFileSync
-} from 'node:fs';
+import { lstatSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 import { contentHash, lineLocation, versionHash } from './evidence.ts';
 import { textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
 import { checkOutsideRoots, id, MarginError, registryLocation, unsafeStorage, type Root } from './registry.ts';
-import { publishExclusive, requirePrivateAccess, syncDirectory } from './filesystem.ts';
-import { isMissing, requirePrivateDirectory } from './storage.ts';
+import { publishExclusive, syncDirectory } from './filesystem.ts';
+import { isMissing, requirePrivateDirectory, writePrivateFile } from './storage.ts';
 import { readLiveSource, savedNotesDirectory, savedNotesId, sourceId } from './sources.ts';
 
 const inputText = z.string().refine(text => text.isWellFormed());
@@ -32,19 +30,21 @@ const metadataSchema = z.strictObject({
   citations: noteCitations
 });
 
+export function savedNoteStore(registry: string) {
+  return join(dirname(registry), savedNotesDirectory, contentHash(basename(registry)));
+}
+
 export function savedNoteRoot(registryPath: string, projectId: string, allRoots: Root[], create = false): Root | undefined {
   const registry = registryLocation(registryPath);
   const parent = dirname(registry);
-  const scope = [savedNotesDirectory, contentHash(basename(registry)), contentHash(projectId)];
-  const location = join(parent, ...scope);
+  const store = savedNoteStore(registry);
+  const location = join(store, contentHash(projectId));
   try {
     checkOutsideRoots(location, allRoots, 'saved notes directory');
     requirePrivateDirectory(parent);
-    let directory = parent;
-    for (const segment of scope) {
-      directory = join(directory, segment);
-      requirePrivateDirectory(directory, create);
-    }
+    requirePrivateDirectory(dirname(store), create);
+    requirePrivateDirectory(store, create);
+    requirePrivateDirectory(location, create);
     return { id: savedNotesId, kind: 'context', path: location };
   } catch (error) {
     if (!create && isMissing(error)) return undefined;
@@ -94,14 +94,7 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
     const staged = join(root.path, `${randomUUID()}.tmp`);
     location = staged;
     try {
-      const fd = openSync(staged, 'wx+', 0o600);
-      try {
-        requirePrivateAccess(fd);
-        writeFileSync(fd, text);
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+      writePrivateFile(staged, text);
       // Publish without overwriting another save or creating a second hard link.
       location = path;
       try {

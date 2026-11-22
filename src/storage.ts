@@ -1,5 +1,6 @@
+import { closeSync, fsyncSync, openSync, writeFileSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import { createPrivateDirectory, requirePrivateAccess, withDirectory, withEntry } from './filesystem.ts';
+import { createPrivateDirectory, openEntry, requirePrivateAccess, withDirectory } from './filesystem.ts';
 
 export function isMissing(error: unknown) {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
@@ -30,12 +31,40 @@ export function requirePrivateDirectory(path: string, create = false) {
   }
 }
 
+function openVerifiedFile(directory: number, name: string) {
+  requirePrivateAccess(directory);
+  const fd = openEntry(directory, name, false);
+  try {
+    requirePrivateAccess(fd);
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+export function openPrivateFile(path: string) {
+  return withDirectory(dirname(path), directory => openVerifiedFile(directory, basename(path)));
+}
+
 export function readPrivateFile<T>(path: string, use: (fd: number) => T) {
   return withDirectory(dirname(path), directory => {
-    requirePrivateAccess(directory);
-    return withEntry(directory, basename(path), false, fd => {
-      requirePrivateAccess(fd);
+    const fd = openVerifiedFile(directory, basename(path));
+    try {
       return use(fd);
-    });
+    } finally {
+      closeSync(fd);
+    }
   });
+}
+
+export function writePrivateFile(path: string, data: string | Buffer) {
+  const fd = openSync(path, 'wx+', 0o600);
+  try {
+    requirePrivateAccess(fd);
+    writeFileSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }

@@ -240,6 +240,17 @@ try {
     return { saved, cited };
   });
 
+  const backup = join(dirname(registry), 'Note backup é');
+  margin('export-notes', backup);
+  assert.throws(() => margin('restore-notes', backup), error =>
+    error.status === 1 && error.stderr.toString().includes('note_backup_destination_exists'));
+  rmSync(join(dirname(registry), '.margin-saved-notes'), { recursive: true });
+  const index = `${registry}.${createHash('sha256').update(projectId).digest('hex')}.sqlite`;
+  for (const suffix of ['', '-journal', '-wal', '-shm']) rmSync(index + suffix, { force: true });
+  margin('restore-notes', backup);
+  if (extractors) await refreshLinks();
+  else margin('refresh', projectId);
+
   await inFreshCodexThread(async call => {
     const { sources } = await call('list_sources', { projectId });
     assert.deepEqual(sources.filter(source => source.rootId === '@saved-notes').map(source => source.sourceId),
@@ -258,7 +269,7 @@ try {
       assert.deepEqual(await search('private', noteBody), []);
     }
     assert.deepEqual(await call('save_project_note', { ...note, citations: [cited] }), saved);
-    console.log('A restarted Codex session found the private note, reopened its citation, and recovered the same save.');
+    console.log('A fresh Codex session found the restored note, reopened its citation, and recovered the same save.');
 
     writeFileSync(source, 'The new checklist has no birds.\n');
     for (const mode of ['ranked', 'literal']) {

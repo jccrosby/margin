@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   closeSync, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, realpathSync, statSync,
   renameSync, rmSync, writeFileSync
@@ -6,8 +7,8 @@ import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'n
 import { z } from 'zod';
 
 import { requireGitCheckout } from './git.ts';
-import { entryPath, isNativeAbsolutePath, localFilesystem, requirePrivateAccess, verifyVolume, windows, withDirectory, withEntry } from './filesystem.ts';
-import { isMissing, readPrivateFile, requirePrivateDirectory } from './storage.ts';
+import { entryPath, isNativeAbsolutePath, localFilesystem, requirePrivateAccess, tryFileLock, unlockFile, verifyVolume, windows, withDirectory, withEntry } from './filesystem.ts';
+import { isMissing, openPrivateFile, readPrivateFile, requirePrivateDirectory } from './storage.ts';
 
 export const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 const root = z.strictObject({
@@ -77,20 +78,26 @@ export function registryLocation(path: string) {
       `Check ${windows ? path : JSON.stringify(path)}. Use an absolute registry path without '..' segments.`);
   }
   try {
-    if (!isNativeAbsolutePath(path)) throw new Error('Invalid registry path.');
-    const normalized = normalize(path);
-    verifyVolume(normalized);
-    const location = windows ? normalized : resolveSystemAlias(normalized);
-    const name = basename(location);
-    const parent = canonicalParent(dirname(location));
-    try {
-      return withDirectory(parent, fd => withEntry(fd, name, false, entryPath));
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      return join(parent, name);
-    }
+    return canonicalStoragePath(path, false);
   } catch {
     throw unsafeStorage('registry_unavailable', path);
+  }
+}
+
+export function canonicalStoragePath(path: string, directory: boolean) {
+  if (!isNativeAbsolutePath(path) || (windows ? path.split(/[\\/]/) : path.split(sep)).includes('..')) {
+    throw new Error('Use an absolute path without parent segments.');
+  }
+  const normalized = normalize(path);
+  verifyVolume(normalized);
+  const location = windows ? normalized : resolveSystemAlias(normalized);
+  const name = basename(location);
+  const parent = canonicalParent(dirname(location));
+  try {
+    return withDirectory(parent, fd => withEntry(fd, name, directory, entryPath));
+  } catch (error) {
+    if (!isMissing(error)) throw error;
+    return join(parent, name);
   }
 }
 
@@ -118,6 +125,50 @@ function lstatOrMissing(path: string) {
   } catch (error) {
     if (!isMissing(error)) throw error;
   }
+}
+
+export function registryWriteLock(registry: string, mode: 'shared' | 'exclusive' = 'shared') {
+  loadRegistry(registry);
+  return acquireRegistryWriteLock(registry, mode);
+}
+
+function acquireRegistryWriteLock(registry: string, mode: 'shared' | 'exclusive') {
+  const parent = dirname(registry);
+  const hash = createHash('sha256').update(basename(registry)).digest('hex');
+  // Keep the file so every process locks the same file identity.
+  const path = join(parent, `.margin-writers-${hash}.lock`);
+  let fd;
+  let acquired = false;
+  try {
+    requirePrivateDirectory(parent);
+    try {
+      fd = openPrivateFile(path);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      try {
+        fd = openSync(path, 'wx+', 0o600);
+        requirePrivateAccess(fd);
+      } catch (creationError) {
+        if ((creationError as NodeJS.ErrnoException).code !== 'EEXIST') throw creationError;
+        fd = openPrivateFile(path);
+      }
+    }
+    acquired = tryFileLock(fd, mode);
+  } catch (error) {
+    throw unsafeStorage('registry_unavailable', (error as NodeJS.ErrnoException).path ?? path);
+  } finally {
+    if (!acquired && fd !== undefined) closeSync(fd);
+  }
+  if (!acquired) {
+    throw new MarginError('registry_busy', `Wait for the Margin writer or note recovery command to finish. Check ${registry}.`);
+  }
+  const lock = fd;
+  return {
+    [Symbol.dispose]() {
+      unlockFile(lock);
+      closeSync(lock);
+    }
+  };
 }
 
 export function register(path: string, projectId: string, checkout: string, notes?: string) {
@@ -166,10 +217,15 @@ function writeProject(path: string, projectId: string, update: (current: Project
   const destination = registryLocation(path);
   if (lstatOrMissing(destination)) loadRegistry(destination);
   const parent = dirname(destination);
+  try {
+    requirePrivateDirectory(parent, true);
+  } catch (error) {
+    throw unsafeStorage('registry_unavailable', (error as NodeJS.ErrnoException).path ?? parent);
+  }
+  using writer = acquireRegistryWriteLock(destination, 'shared');
   const lock = `${destination}.lock`;
   let descriptor;
   try {
-    requirePrivateDirectory(parent, true);
     descriptor = openSync(lock, 'wx+', 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
