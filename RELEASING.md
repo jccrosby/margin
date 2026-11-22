@@ -37,7 +37,7 @@ Record the package version, full commit, and SHA-256. Transfer that archive priv
 
 ## Run the automated checks
 
-On each target, install the Codex CLI, OpenSSL, Docling, FFmpeg, and `ffprobe`. Install the Docling models needed for PDF, DOCX, and OCR. Use a temporary directory on the target filesystem. On Ubuntu, the bind mount test also needs `sudo -n mount` and `sudo -n umount`.
+On each target, install the Codex CLI, OpenSSL, Docling, FFmpeg, and `ffprobe`. Install the Docling models needed for PDF, DOCX, and OCR. Use a temporary directory on the target filesystem. Unset `NODE_OPTIONS` before running qualification. On Ubuntu, the bind mount test also needs `sudo -n mount` and `sudo -n umount`.
 
 From the clean source checkout, pass the archive path and the recorded commit and SHA-256.
 
@@ -59,13 +59,36 @@ Use only synthetic data. Record the result and supporting evidence for each chec
 
 1. Start a fresh candidate session. Register a synthetic Git project with a copy of the media fixtures in `test/fixtures/evidence`. Enable note saves and save a note with a citation.
 2. From the owner account, start a refresh of uncached media. While it runs, list the actual private paths. Include the registry, note, index, active SQLite WAL and shared-memory files, and an evidence scratch file. The refresh holds its index transaction open while Docling extracts a document.
-3. Sign in as another ordinary account. Confirm the account can read and rename its own control file. Try to read each listed file and rename it with a `.probe` suffix. List the private storage directory and try to rename it too. On Unix use `cat`, `ls`, and `mv`. In PowerShell use `Get-Content`, `Get-ChildItem`, and `Rename-Item` with `-LiteralPath` and `-ErrorAction Stop`.
-4. Require an access denial for both operations. A missing file leaves a gap. If a scratch file or sidecar disappears, repeat an uncached refresh and retry while the owner confirms the file exists.
-5. From the owner account, confirm the data and citation still work. Record the protected paths by role, the account type, and each result. Mark `manual.secondAccount` as `pass` only when all checks pass.
+3. Sign in as another ordinary account. Apply the probes below to its own control file first. Confirm read, write-open, and rename succeed.
+4. Try to read each listed file. Open each existing file for writing and close it without writing. Rename each file with a `.probe` suffix. Try listing and renaming the private storage directory too.
+5. Require an access denial for each probe. Missing files and sharing violations leave a gap. Confirm transient files exist during the probes. Repeat an uncached refresh if needed.
+6. Restore any renamed synthetic paths under the owner account and mark that check failed. Confirm the owner can still read the data and open the citation. Record the file roles and outcomes. Mark `manual.secondAccount` as `pass` after every denial.
+
+On Unix, use `cat`, `ls`, and `mv` for reads, listings, and renames. Use this write probe. It opens the existing file without creating, truncating, or writing it.
+
+```sh
+node -e 'const fs = require("node:fs"); fs.closeSync(fs.openSync(process.argv[1], fs.constants.O_WRONLY | fs.constants.O_APPEND))' "$file"
+```
+
+In PowerShell, use `Get-Content`, `Get-ChildItem`, and `Rename-Item` with `-LiteralPath` and `-ErrorAction Stop`. Use this write probe.
+
+```powershell
+[IO.File]::Open($file, 'Open', 'Write', 'ReadWrite, Delete').Dispose()
+```
 
 ### PowerShell launcher on Windows
 
-Follow the [Windows setup guide](docs/windows.md) in PowerShell. Use a synthetic registry and install path with spaces. In the install command, replace the package version argument with the path to the candidate archive. Confirm Codex uses `node.exe` with the installed `margin.js` and registry paths. Start a fresh session and list, search, read, and reopen a citation. Record that result under `manual.powerShellLauncher`.
+Use the paths and registration commands in the [Windows setup guide](docs/windows.md). Skip the registry login and version lookup. Set `$tarball` to the local archive. Use an unused install directory and a synthetic registry. Keep spaces in both paths.
+
+```powershell
+npm.cmd install --prefix $install --save-exact $tarball
+if ($LASTEXITCODE -ne 0) { throw 'Margin install failed.' }
+$server = 'margin-qualification-' + [guid]::NewGuid().ToString('N')
+codex mcp add $server -- $node $entry --registry $registry serve
+codex mcp get $server
+```
+
+Confirm Codex uses `node.exe` with the installed `margin.js` and registry paths. In a fresh session, use the temporary server to list, search, and read sources. Reopen a citation. Remove the temporary entry with `codex mcp remove $server`. Record the result under `manual.powerShellLauncher`.
 
 ### Upgrade on macOS
 

@@ -9,9 +9,11 @@ import { fileURLToPath } from 'node:url';
 const [archive, commit, sha256, codex, ...extra] = process.argv.slice(2);
 assert.ok(archive && /^[a-f0-9]{40}$/i.test(commit ?? '') && /^[a-f0-9]{64}$/i.test(sha256 ?? '') && !extra.length,
   'Usage: node scripts/qualify-candidate.js <tarball> <source-commit> <sha256> [codex]');
-const tarball = realpathSync(resolve(archive));
-const cwd = fileURLToPath(new URL('../', import.meta.url));
-const temp = realpathSync(tmpdir());
+assert.ok(!Object.entries(process.env).some(([key, value]) => key.toUpperCase() === 'NODE_OPTIONS' && value),
+  'Unset NODE_OPTIONS before qualification so the full test suite runs.');
+const tarball = realpathSync.native(resolve(archive));
+const cwd = realpathSync.native(fileURLToPath(new URL('../', import.meta.url)));
+const temp = realpathSync.native(tmpdir());
 const env = { ...process.env, MARGIN_TEST_EXTRACTORS: '1' };
 const text = (command, args) => execFileSync(command, args, { cwd, encoding: 'utf8' }).trim();
 function verifyHash() {
@@ -46,7 +48,7 @@ if (process.platform === 'darwin' && process.arch === 'arm64') {
   }
   target = 'macos-arm64-apfs';
 } else if (windows && process.arch === 'x64') {
-  release = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+  const volumeCheck = `
     $ErrorActionPreference = 'Stop'
     $os = Get-CimInstance Win32_OperatingSystem
     $processors = Get-CimInstance Win32_Processor
@@ -57,14 +59,25 @@ if (process.platform === 'darwin' && process.arch === 'arm64') {
     if ($os.ProductType -ne 1 -or $version -ne '25H2' -or $os.BuildNumber -notmatch '^26200$') {
       throw 'Use Windows 11 25H2 x64.'
     }
-    foreach ($path in @($env:MARGIN_QUALIFY_TEMP, $env:MARGIN_QUALIFY_REPO)) {
-      $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($path))
-      if ($drive.DriveType -ne 'Fixed' -or $drive.DriveFormat -ne 'NTFS') {
-        throw 'Use local NTFS for the checkout and temporary files.'
+    $tempProbe = Join-Path $env:MARGIN_QUALIFY_TEMP ([IO.Path]::GetRandomFileName())
+    [IO.File]::Open($tempProbe, 'CreateNew').Dispose()
+    try {
+      $checkoutFile = Join-Path $env:MARGIN_QUALIFY_REPO 'package.json'
+      foreach ($path in @($tempProbe, $checkoutFile)) {
+        $volumes = @(Get-Volume -FilePath $path)
+        if ($volumes.Count -ne 1 -or $volumes[0].CimInstanceProperties['DriveType'].Value -ne 3 -or
+            $volumes[0].FileSystem -ne 'NTFS') {
+          throw 'Use local NTFS for the checkout and temporary files.'
+        }
       }
+    } finally {
+      [IO.File]::Delete($tempProbe)
     }
     Write-Output "$version ($($os.Version))"
-  `], { cwd, encoding: 'utf8', env: { ...env, MARGIN_QUALIFY_TEMP: temp, MARGIN_QUALIFY_REPO: cwd } }).trim();
+  `;
+  release = execFileSync('powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(volumeCheck, 'utf16le').toString('base64')],
+    { cwd, encoding: 'utf8', env: { ...env, MARGIN_QUALIFY_TEMP: temp, MARGIN_QUALIFY_REPO: cwd } }).trim();
   target = 'windows-x64-ntfs';
 } else if (process.platform === 'linux' && process.arch === 'x64') {
   assert.doesNotMatch(kernelRelease(), /microsoft|wsl/i, 'Use native Ubuntu outside WSL.');

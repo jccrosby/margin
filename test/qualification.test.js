@@ -37,3 +37,13 @@ test('qualification refuses a candidate that lacks a native addon', t => {
   assert.match(result.stderr, /Candidate is missing package\/dist\/linux\.node/);
   assert.equal(result.stdout, '');
 });
+
+test('qualification rejects Node options that would filter the full test suite', () => {
+  const result = spawnSync(process.execPath, [qualify, 'margin.tgz', commit, '0'.repeat(64)], {
+    encoding: 'utf8',
+    env: { ...process.env, NODE_OPTIONS: '--test-name-pattern=missing-test-name' }
+  });
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /Unset NODE_OPTIONS/);
+  assert.equal(result.stdout, '');
+});
