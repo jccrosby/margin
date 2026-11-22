@@ -18,7 +18,7 @@ umask 077
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 tarball="$work/margin.tgz"
-pnpm pack --out "$tarball"
+pnpm pack --out "$tarball" >/dev/null
 tar -xOzf "$tarball" package/package.json | node -e '
   const assert = require("node:assert/strict");
   const manifest = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
