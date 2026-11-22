@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <wchar.h>
+#include "lock.h"
 
 #ifndef OBJ_CASE_INSENSITIVE
 #define OBJ_CASE_INSENSITIVE 0x40
@@ -433,13 +434,16 @@ static napi_value file_lock(napi_env env, napi_callback_info info) {
   napi_value args[2], result;
   int operation;
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-  if (argc != 2 || napi_get_value_int32(env, args[1], &operation) != napi_ok || operation < 0 || operation > 2) {
+  if (argc != 2 || napi_get_value_int32(env, args[1], &operation) != napi_ok ||
+      operation < FILE_LOCK_UNLOCK || operation > FILE_LOCK_EXCLUSIVE) {
     return integer(env, -ERROR_INVALID_PARAMETER);
   }
   HANDLE file = handle_arg(env, args[0]);
   OVERLAPPED position = { 0 };
-  DWORD flags = LOCKFILE_FAIL_IMMEDIATELY | (operation == 2 ? LOCKFILE_EXCLUSIVE_LOCK : 0);
-  BOOL locked = operation == 0 ? UnlockFileEx(file, 0, 1, 0, &position) : LockFileEx(file, flags, 0, 1, 0, &position);
+  DWORD flags = LOCKFILE_FAIL_IMMEDIATELY | (operation == FILE_LOCK_EXCLUSIVE ? LOCKFILE_EXCLUSIVE_LOCK : 0);
+  BOOL locked = operation == FILE_LOCK_UNLOCK
+    ? UnlockFileEx(file, 0, 1, 0, &position)
+    : LockFileEx(file, flags, 0, 1, 0, &position);
   if (!locked && GetLastError() != ERROR_LOCK_VIOLATION) return error(env);
   napi_get_boolean(env, locked != FALSE, &result);
   return result;

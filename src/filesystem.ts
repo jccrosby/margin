@@ -101,13 +101,15 @@ export function requirePrivateAccess(fd: number, ancestor = false) {
   if (native.privateAccess(fd, ancestor) !== true) throw new Error('Unsafe permissions, ownership, or ACL.');
 }
 
-export function tryFileLock(fd: number, exclusive: boolean) {
-  const result = native.fileLock(fd, exclusive ? 2 : 1);
+const fileLockOperation = { unlock: 0, shared: 1, exclusive: 2 } as const;
+
+export function tryFileLock(fd: number, mode: 'shared' | 'exclusive') {
+  const result = native.fileLock(fd, fileLockOperation[mode]);
   return typeof result === 'number' ? fail(result) : result;
 }
 
 export function unlockFile(fd: number) {
-  native.fileLock(fd, 0);
+  native.fileLock(fd, fileLockOperation.unlock);
 }
 
 export function publishExclusive(from: string, to: string) {

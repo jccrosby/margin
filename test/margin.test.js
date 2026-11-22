@@ -1178,6 +1178,30 @@ test('saved project notes survive export, index rebuild, and restore', { timeout
   for (const mode of modes) assert.deepEqual((await search(restored, 'beta', mode)).hits, []);
 });
 
+test('an unsafe registry inside a source root leaves no writer lock', { timeout: 15000 }, async t => {
+  const fixture = setup(t);
+  const projectId = 'alpha';
+  fixture.cli('register', projectId, fixture.checkout);
+  const inside = join(fixture.checkout, 'private');
+  renameSync(dirname(fixture.registry), inside);
+  const registry = join(inside, 'unsafe.json');
+  renameSync(join(inside, basename(fixture.registry)), registry);
+  const files = readdirSync(inside).sort();
+  const backup = join(fixture.work, 'backup');
+  for (const [command, arg] of [['refresh', projectId], ['export-notes', backup], ['restore-notes', backup]]) {
+    const result = runWithEnv({ ...fixture, registry }, process.env, command, arg);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /outside the source roots/);
+    assert.deepEqual(readdirSync(inside).sort(), files);
+    assert.equal(existsSync(backup), false);
+  }
+  const client = await connect(t, { ...fixture, registry });
+  assert.deepEqual(await client.call('save_project_note', {
+    projectId, requestId: 'unsafe-store', title: 'Handoff', body: 'Keep the store unchanged.'
+  }), { error: 'registry_unavailable' });
+  assert.deepEqual(readdirSync(inside).sort(), files);
+});
+
 test('recovery refuses existing destinations and unsafe note files', { timeout: 15000 }, async t => {
   const fixture = setup(t);
   const projectId = 'alpha';
@@ -1221,6 +1245,12 @@ test('recovery refuses existing destinations and unsafe note files', { timeout: 
   renameSync(store, join(directory, 'original-notes'));
   const [relativeBackupNote] = readdirSync(backup, { recursive: true }).filter(path => path.endsWith('.md'));
   const backupNote = join(backup, relativeBackupNote);
+  const unexpected = join(dirname(backupNote), 'unexpected.md');
+  writeFileSync(unexpected, 'Unexpected note.', { mode: 0o600 });
+  assert.match(reject('restore-notes', backup, /note_backup_invalid_layout/, JSON.stringify(unexpected)),
+    /Choose an intact backup created by export-notes/);
+  assert.equal(existsSync(store), false);
+  rmSync(unexpected);
   const backupAlias = join(directory, 'backup-alias');
   linkSync(toNamespacedPath(backupNote), backupAlias);
   assert.match(reject('restore-notes', backup, /note_backup_unavailable/, backupNote), privateFix);

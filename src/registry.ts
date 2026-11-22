@@ -127,7 +127,12 @@ function lstatOrMissing(path: string) {
   }
 }
 
-export function registryWriteLock(registry: string, exclusive = false) {
+export function registryWriteLock(registry: string, mode: 'shared' | 'exclusive' = 'shared') {
+  loadRegistry(registry);
+  return acquireRegistryWriteLock(registry, mode);
+}
+
+function acquireRegistryWriteLock(registry: string, mode: 'shared' | 'exclusive') {
   const parent = dirname(registry);
   const hash = createHash('sha256').update(basename(registry)).digest('hex');
   // Keep the file so every process locks the same file identity.
@@ -148,7 +153,7 @@ export function registryWriteLock(registry: string, exclusive = false) {
         fd = openPrivateFile(path);
       }
     }
-    acquired = tryFileLock(fd, exclusive);
+    acquired = tryFileLock(fd, mode);
   } catch (error) {
     throw unsafeStorage('registry_unavailable', (error as NodeJS.ErrnoException).path ?? path);
   } finally {
@@ -217,7 +222,7 @@ function writeProject(path: string, projectId: string, update: (current: Project
   } catch (error) {
     throw unsafeStorage('registry_unavailable', (error as NodeJS.ErrnoException).path ?? parent);
   }
-  using writer = registryWriteLock(destination);
+  using writer = acquireRegistryWriteLock(destination, 'shared');
   const lock = `${destination}.lock`;
   let descriptor;
   try {

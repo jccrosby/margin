@@ -1,15 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import {
-  closeSync, fsyncSync, lstatSync, openSync, rmSync, writeFileSync
-} from 'node:fs';
+import { lstatSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 import { contentHash, lineLocation, versionHash } from './evidence.ts';
 import { textLines } from './passages.ts';
 import { maxBytes, readText } from './read.ts';
 import { checkOutsideRoots, id, MarginError, registryLocation, unsafeStorage, type Root } from './registry.ts';
-import { publishExclusive, requirePrivateAccess, syncDirectory } from './filesystem.ts';
-import { isMissing, requirePrivateDirectory } from './storage.ts';
+import { publishExclusive, syncDirectory } from './filesystem.ts';
+import { isMissing, requirePrivateDirectory, writePrivateFile } from './storage.ts';
 import { readLiveSource, savedNotesDirectory, savedNotesId, sourceId } from './sources.ts';
 
 const inputText = z.string().refine(text => text.isWellFormed());
@@ -96,14 +94,7 @@ export function commitNote(registryPath: string, allRoots: Root[], args: NoteInp
     const staged = join(root.path, `${randomUUID()}.tmp`);
     location = staged;
     try {
-      const fd = openSync(staged, 'wx+', 0o600);
-      try {
-        requirePrivateAccess(fd);
-        writeFileSync(fd, text);
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+      writePrivateFile(staged, text);
       // Publish without overwriting another save or creating a second hard link.
       location = path;
       try {

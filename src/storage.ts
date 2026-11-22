@@ -1,4 +1,4 @@
-import { closeSync } from 'node:fs';
+import { closeSync, fsyncSync, openSync, writeFileSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { createPrivateDirectory, openEntry, requirePrivateAccess, withDirectory } from './filesystem.ts';
 
@@ -56,4 +56,15 @@ export function readPrivateFile<T>(path: string, use: (fd: number) => T) {
       closeSync(fd);
     }
   });
+}
+
+export function writePrivateFile(path: string, data: string | Buffer) {
+  const fd = openSync(path, 'wx+', 0o600);
+  try {
+    requirePrivateAccess(fd);
+    writeFileSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }

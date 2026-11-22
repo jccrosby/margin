@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <unistd.h>
+#include "lock.h"
 
 static napi_value number(napi_env env, int n) {
   napi_value value;
@@ -68,10 +69,12 @@ static napi_value file_lock(napi_env env, napi_callback_info info) {
   int fd, operation;
   napi_get_cb_info(env, info, &argc, args, NULL, NULL);
   if (argc != 2 || napi_get_value_int32(env, args[0], &fd) != napi_ok ||
-      napi_get_value_int32(env, args[1], &operation) != napi_ok || operation < 0 || operation > 2) {
+      napi_get_value_int32(env, args[1], &operation) != napi_ok ||
+      operation < FILE_LOCK_UNLOCK || operation > FILE_LOCK_EXCLUSIVE) {
     return number(env, -EINVAL);
   }
-  int flags = operation == 0 ? LOCK_UN : operation == 1 ? LOCK_SH | LOCK_NB : LOCK_EX | LOCK_NB;
+  int flags = operation == FILE_LOCK_UNLOCK ? LOCK_UN
+    : LOCK_NB | (operation == FILE_LOCK_SHARED ? LOCK_SH : LOCK_EX);
   bool locked = flock(fd, flags) == 0;
   if (!locked && errno != EWOULDBLOCK) return number(env, -errno);
   napi_get_boolean(env, locked, &result);
