@@ -4,7 +4,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, toNamespacedPath } from 'node:path';
 import { createInterface } from 'node:readline';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -1252,8 +1252,7 @@ fs.writeFileSync = (destination, data, options) => {
   if (typeof data === 'string' && data.includes('frozencaribou')) {
     write(destination, data.slice(0, data.length / 2), options);
     write(${JSON.stringify(staged)}, '');
-    const deadline = Date.now() + 10_000;
-    while (!fs.existsSync(${JSON.stringify(release)}) && Date.now() < deadline) {
+    while (!fs.existsSync(${JSON.stringify(release)})) {
       Atomics.wait(waiter, 0, 0, 10);
     }
     return write(destination, data.slice(data.length / 2), options);
@@ -1263,7 +1262,7 @@ fs.writeFileSync = (destination, data, options) => {
 fs.rmSync = (path, options) => {
   if (typeof path === 'string' && path.endsWith('.tmp')) {
     write(${JSON.stringify(published)}, '');
-    Atomics.wait(waiter, 0, 0, 10_000);
+    Atomics.wait(waiter, 0, 0);
   }
   return remove(path, options);
 };
@@ -1281,7 +1280,7 @@ syncBuiltinESMExports();
   const reader = await connect(t, fixture);
   const list = () => reader.call('list_sources', { projectId: 'alpha' });
   assert.deepEqual((await list()).sources, []);
-  await writer.stop('SIGKILL');
+  assert.deepEqual(await writer.stop('SIGKILL'), [null, 'SIGKILL']);
   assert.deepEqual((await list()).sources, []);
 
   rmSync(staged);
@@ -1306,7 +1305,7 @@ syncBuiltinESMExports();
       assert.equal(uid, process.getuid());
     }
   }
-  await retry.stop('SIGKILL');
+  assert.deepEqual(await retry.stop('SIGKILL'), [null, 'SIGKILL']);
   assert.deepEqual(await reader.call('save_project_note', args), { noteId: sourceId, createdAt });
   assert.deepEqual((await list()).sources.map(source => source.sourceId), [sourceId]);
 });
@@ -1454,9 +1453,21 @@ test('unsafe saved note files block reads and retries without changing the note'
   const [note] = readdirSync(directory, { recursive: true }).filter(path => path.endsWith('.md'));
   const path = join(directory, note);
   const before = readFileSync(path);
-  if (windows) execFileSync('icacls.exe', [path, '/grant', '*S-1-1-0:R']);
-  else if (linux) execFileSync('setfacl', ['-m', 'u:65534:r--,m::---', path]);
-  else execFileSync('/bin/chmod', ['+a', 'everyone allow read', path]);
+  if (windows) {
+    // Give icacls a short path. Remove the alias before checking the note.
+    const alias = join(directory, 'acl.md');
+    linkSync(toNamespacedPath(path), alias);
+    try {
+      execFileSync('icacls.exe', [alias, '/grant', '*S-1-1-0:R']);
+    } finally {
+      rmSync(alias);
+    }
+    assert.equal(statSync(path).nlink, 1);
+  } else if (linux) {
+    execFileSync('setfacl', ['-m', 'u:65534:r--,m::---', path]);
+  } else {
+    execFileSync('/bin/chmod', ['+a', 'everyone allow read', path]);
+  }
 
   const read = await client.call('read_source', { projectId: 'alpha', sourceId: noteId });
   const retry = await client.call('save_project_note', args);

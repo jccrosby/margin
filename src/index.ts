@@ -230,11 +230,7 @@ function publishRoot(db: DatabaseSync, root: Root, key: string, inventory: Retur
       if (format) bytes = read(relativePath, readEvidenceBytes);
       else text = read(relativePath, readText);
     } catch (cause) {
-      gaps.push({
-        error: cause instanceof MarginError ? cause.message : 'source_unavailable',
-        detail: cause instanceof MarginError ? cause.detail : undefined,
-        relativePath
-      });
+      gaps.push(sourceReadGap(cause, relativePath));
       continue;
     }
 
@@ -658,14 +654,16 @@ function verify(root: Root, relativePath: string, expected: string, coverage: Co
       ? readEvidenceBytes(fd) : readText(fd));
     if (hash(content) === expected) return true;
   } catch (cause) {
-    gap = {
-      error: cause instanceof MarginError ? cause.message : 'source_unavailable',
-      detail: cause instanceof MarginError ? cause.detail : undefined,
-      relativePath
-    };
+    gap = sourceReadGap(cause, relativePath);
   }
   recordGap(coverage, root.id, gap);
   return false;
+}
+
+function sourceReadGap(cause: unknown, relativePath: string): Gap {
+  return cause instanceof MarginError
+    ? { error: cause.message, detail: cause.detail, relativePath }
+    : { error: 'source_unavailable', relativePath };
 }
 
 function recordGap(coverage: Coverage, rootId: string, gap: Gap) {
