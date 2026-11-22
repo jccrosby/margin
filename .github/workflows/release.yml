@@ -1,4 +1,4 @@
-name: Release Margin
+name: Check Margin package
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 permissions: {}
 
 jobs:
-  publish:
+  check-package:
     if: github.ref == 'refs/heads/main'
     concurrency:
       group: margin-package-release
@@ -15,7 +15,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -24,31 +23,5 @@ jobs:
         with:
           node-version: '26'
           package-manager-cache: false
-          registry-url: https://npm.pkg.github.com
-          scope: '@jccrosby'
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run typecheck
-      - run: pnpm test
-      - name: Pack and check the release
-        id: pack
-        run: |
-          tarball="$RUNNER_TEMP/margin.tgz"
-          pnpm pack --out "$tarball"
-          node scripts/check-package.js "$tarball"
-          git rev-parse HEAD
-          shasum -a 256 "$tarball" > "$tarball.sha256"
-          cat "$tarball.sha256"
-          printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
-      - name: Publish the checked tarball
-        env:
-          MARGIN_TARBALL: ${{ steps.pack.outputs.tarball }}
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if ! name=$(pnpm view @jccrosby/margin name --registry=https://npm.pkg.github.com) ||
-              [[ "$name" != '@jccrosby/margin' ]]; then
-            echo 'Cannot read @jccrosby/margin. Publish the first version privately and grant this repository Write access under Manage Actions access.'
-            exit 1
-          fi
-          shasum -a 256 --check "$MARGIN_TARBALL.sha256"
-          pnpm publish "$MARGIN_TARBALL" --ignore-scripts --registry=https://npm.pkg.github.com
+      - run: pnpm run release:bootstrap

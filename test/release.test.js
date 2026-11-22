@@ -7,6 +7,15 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const checkPackage = fileURLToPath(new URL('../scripts/check-package.js', import.meta.url));
+const bootstrap = fileURLToPath(new URL('../scripts/bootstrap-release.sh', import.meta.url));
+
+test('the bootstrap command blocks publication pending native qualification', {
+  skip: process.platform === 'win32'
+}, () => {
+  const result = spawnSync('bash', [bootstrap, '--publish'], { encoding: 'utf8' });
+  assert.equal(result.status, 1, result.error?.message);
+  assert.match(result.stderr, /Publication blocked.*one tarball.*all three native targets/);
+});
 
 test('the release check blocks archives that admit another platform', t => {
   const work = mkdtempSync(join(tmpdir(), 'margin-release-test-'));
