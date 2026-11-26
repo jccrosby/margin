@@ -40,7 +40,7 @@ jobs:
       - name: Check installed package over stdio
         run: |
           $tarball = Join-Path $env:RUNNER_TEMP 'margin.tgz'
-          pnpm pack --out $tarball
+          pnpm --config.pnpmfile=scripts/candidate-pnpmfile.cjs pack --out $tarball
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check-package.js $tarball --candidate
       - name: Open HTTPS and media evidence in a fresh Codex thread

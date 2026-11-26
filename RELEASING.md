@@ -1,5 +1,7 @@
 # Release Margin
 
+Publish only for macOS 26 on Apple silicon. [Issue #62](https://github.com/jccrosby/margin/issues/62) tracks cross-platform qualification.
+
 ## Publish an update
 
 1. Run `pnpm version <version> --no-git-tag-version` and merge the version bump through a PR.
@@ -80,11 +82,11 @@ pnpm install --frozen-lockfile
 pnpm run typecheck
 pnpm test
 $tarball = Join-Path $env:TEMP 'margin.tgz'
-pnpm pack --out $tarball
+pnpm --config.pnpmfile=scripts/candidate-pnpmfile.cjs pack --out $tarball
 node scripts/check-package.js $tarball --candidate
 ```
 
-The check installs the archive outside the checkout. It starts the installed CLI and MCP server through Node. Use the [Windows setup guide](docs/windows.md) to also check a fresh Codex session on Windows 11 25H2.
+The pack command marks the archive private and restricts installation to the build platform. The check installs it outside the checkout and starts the CLI and MCP server through Node.
 
 ## Check an Ubuntu candidate
 
@@ -95,13 +97,11 @@ pnpm install --frozen-lockfile
 pnpm run typecheck
 pnpm test
 tarball="$(mktemp -d)/margin.tgz"
-pnpm pack --out "$tarball"
+pnpm --config.pnpmfile=scripts/candidate-pnpmfile.cjs pack --out "$tarball"
 node scripts/check-package.js "$tarball" --candidate
 node scripts/check-codex.js "$tarball"
 ```
 
 Set `MARGIN_TEST_BIND_MOUNTS=1` to include the bind mount test if your account can run `sudo -n mount` and `sudo -n umount`.
 
-The package check uses `npx` outside the checkout. Use the [Ubuntu setup guide](docs/ubuntu.md) to check a fresh Codex session.
-
-The release workflow blocks cross-platform publication until native qualification passes.
+The pack command marks the archive private and restricts installation to the build platform. The package check uses `npx` outside the checkout.

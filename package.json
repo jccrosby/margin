@@ -5,8 +5,8 @@
   "type": "module",
   "bin": {"margin": "dist/margin.js"},
   "files": ["dist/*.js", "dist/macos.node", "dist/windows.node", "dist/linux.node"],
-  "os": ["darwin", "win32", "linux"],
-  "cpu": ["arm64", "x64"],
+  "os": ["darwin"],
+  "cpu": ["arm64"],
   "engines": {"node": ">=26 <27"},
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"

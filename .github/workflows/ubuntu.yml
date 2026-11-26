@@ -47,7 +47,7 @@ jobs:
       - name: Check installed package over stdio
         run: |
           tarball="$RUNNER_TEMP/margin.tgz"
-          pnpm pack --out "$tarball"
+          pnpm --config.pnpmfile=scripts/candidate-pnpmfile.cjs pack --out "$tarball"
           node scripts/check-package.js "$tarball" --candidate
           git rev-parse HEAD
           sha256sum "$tarball"
