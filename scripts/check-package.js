@@ -19,9 +19,9 @@ if (candidate) {
   assert.ok(manifest.os?.includes(process.platform), 'The tarball must support this operating system.');
   assert.ok(manifest.cpu?.includes(process.arch), 'The tarball must support this architecture.');
 } else {
-  assert.ok(Array.isArray(manifest.os) && manifest.os.length === 1 && manifest.os[0] === 'darwin',
-    'Release blocked. Run the required native checks and qualify the same tarball on all three targets before enabling cross-platform publication.');
-  assert.deepEqual(manifest.cpu, ['arm64']);
+  assert.deepEqual({ os: manifest.os, cpu: manifest.cpu }, { os: ['darwin'], cpu: ['arm64'] },
+    'Release blocked. The release tarball must target macOS on Apple silicon.');
+  assert.notEqual(manifest.private, true, 'Release blocked. This tarball is for local testing.');
 }
 const sources = readdirSync(new URL('../src/', import.meta.url));
 const compiledFiles = sources.filter(file => file.endsWith('.ts'))

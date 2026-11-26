@@ -7,6 +7,8 @@ Margin lets Codex search and read your local project files. It works with Git ch
 
 ## Get access to Margin
 
+The published package supports macOS 26 on Apple silicon.
+
 Ask the package owner for **Read** access to `@jccrosby/margin`. Create a GitHub personal access token (classic) with the `read:packages` scope.
 
 Run these commands from your home directory. Enter your GitHub username and use your token as the password. [GitHub Packages authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages)
@@ -97,7 +99,7 @@ The checkout paths, file hashes, and Git status matched the baseline.
 
 See the [release instructions](RELEASING.md) for package checks and publishing.
 
-See the [Windows guide](docs/windows.md) and [Ubuntu guide](docs/ubuntu.md) for their installation commands.
+See the [release instructions](RELEASING.md#check-a-windows-candidate) to test Windows and Ubuntu builds.
 
 ## Evaluate retrieval
 
