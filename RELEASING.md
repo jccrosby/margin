@@ -53,6 +53,24 @@ In GitHub package settings, confirm **Private** visibility and grant readers dir
 
 4. Record the version, source commit, tarball SHA-256, and check results. Keep tokens, local paths, and project data out of the record.
 
+## Check a macOS candidate
+
+Use macOS 26 on Apple silicon, local APFS, Node.js 26, Git, pnpm 12.18.0, and the Xcode Command Line Tools. Run these commands from the Margin checkout.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm test
+tarball="$(mktemp -d)/margin.tgz"
+pnpm pack --out "$tarball"
+node scripts/check-package.js "$tarball" --candidate
+node scripts/check-codex.js "$tarball"
+```
+
+The package check launches the archive through pnpm and npm with fresh caches. The Codex check uses a separate registry and synthetic Git checkouts.
+
+For a manual onboarding check, install the archive in a test environment. Run `margin setup` from a synthetic Git checkout. Accept the suggested ID, skip notes, and check that setup reports a complete refresh. Run `margin refresh` with that ID and verify a search in a fresh Codex session.
+
 ## Check a Windows candidate
 
 Run these commands on Windows with native Node.js 26 x64, Git, Python, and Visual Studio C++ build tools.

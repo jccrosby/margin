@@ -114,6 +114,45 @@ test('the CLI reports the supported platforms when Node uses another architectur
   assert.match(result.stderr, /Run Margin on macOS ARM64, Windows x64, or Ubuntu x64/);
 });
 
+macTest('setup indexes the current checkout and optional notes without replacing a project', t => {
+  const fixture = setup(t);
+  const home = join(fixture.work, 'home');
+  const registry = join(home, 'Library', 'Application Support', 'Margin', 'projects.json');
+  const subdirectory = join(fixture.checkout, 'subdirectory');
+  const notes = join(fixture.work, 'project notes ');
+  mkdirSync(home);
+  mkdirSync(subdirectory);
+  mkdirSync(notes);
+  writeFileSync(join(fixture.checkout, 'README.md'), 'Setup test');
+  writeFileSync(join(notes, 'plan.md'), 'Setup notes');
+  const setupArgs = [entry, 'setup'];
+  const terminal = "process.stdin.isTTY = process.stderr.isTTY = true;";
+  const options = { cwd: subdirectory, env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: commandTimeout };
+  const unattended = spawnSync(process.execPath, setupArgs, options);
+  assert.equal(unattended.status, 1, unattended.error?.message);
+  assert.match(unattended.stderr, /Run margin setup in a terminal/);
+  assert.ok(!existsSync(registry));
+
+  const answer = input => spawnSync(process.execPath, [
+    '--import', `data:text/javascript,${encodeURIComponent(terminal)}`, ...setupArgs
+  ], { ...options, input });
+  const initial = answer('\n../../project notes \n');
+  assert.equal(initial.status, 0, initial.stderr || initial.error?.message);
+  assert.match(initial.stderr, /Project ID \[checkout\]/);
+  const refresh = JSON.parse(initial.stdout);
+  assert.equal(refresh.projectId, 'checkout');
+  assert.deepEqual(refresh.roots.map(root => [root.rootId, root.status]), [['code', 'complete'], ['notes', 'complete']]);
+
+  const original = readFileSync(registry, 'utf8');
+  const duplicate = answer('\n\n');
+  assert.equal(duplicate.status, 1, duplicate.stderr || duplicate.error?.message);
+  assert.match(duplicate.stderr, /already exists/);
+  assert.equal(readFileSync(registry, 'utf8'), original);
+  const refreshed = spawnSync(process.execPath, [entry, 'refresh', 'checkout'], options);
+  assert.equal(refreshed.status, 0, refreshed.stderr || refreshed.error?.message);
+  assert.equal(JSON.parse(refreshed.stdout).projectId, 'checkout');
+});
+
 test('the CLI registers roots and the MCP server lists projects with live cursors', { timeout: 10000 }, async t => {
   const fixture = setup(t);
   fixture.cli('register', 'zeta', fixture.checkout, fixture.notes);

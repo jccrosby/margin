@@ -171,17 +171,20 @@ function acquireRegistryWriteLock(registry: string, mode: 'shared' | 'exclusive'
   };
 }
 
-export function register(path: string, projectId: string, checkout: string, notes?: string) {
+export function register(path: string, projectId: string, checkout: string, notes?: string, createOnly = false) {
   id.parse(projectId);
   const roots: Root[] = [{ id: 'code', kind: 'git', path: directory(checkout) }];
   withDirectory(roots[0].path, requireGitCheckout);
   if (notes !== undefined) roots.push({ id: 'notes', kind: 'context', path: directory(notes) });
 
   checkOutsideRoots(registryLocation(path), roots);
-  writeProject(path, projectId, old => ({
-    ...old,
-    roots: [...roots, ...(old?.roots.filter(root => root.id !== 'code' && root.id !== 'notes') ?? [])]
-  }));
+  writeProject(path, projectId, old => {
+    if (createOnly && old) throw new Error(`Project "${projectId}" already exists. Run setup with a different project ID.`);
+    return {
+      ...old,
+      roots: [...roots, ...(old?.roots.filter(root => root.id !== 'code' && root.id !== 'notes') ?? [])]
+    };
+  });
 }
 
 export function addCheckout(path: string, projectId: string, rootId: string, checkout: string) {

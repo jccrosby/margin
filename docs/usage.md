@@ -1,8 +1,8 @@
 # Use Margin
 
-[Set up Margin and register a project](../README.md#get-access-to-margin) before using this guide. Use your package version, projects path, and project ID in the examples below.
+[Install Margin](../README.md#install-on-macos) and [register a project](../README.md#register-and-index-your-first-project). Replace `demo` with your project ID.
 
-If you run from source, use the [source checkout instructions](../README.md#run-margin-from-a-checkout).
+The examples use the macOS `margin` command. For other launchers or a custom projects file, see [Run Margin from scripts](#run-margin-from-scripts).
 
 ## Ask Codex about a project
 
@@ -21,8 +21,7 @@ Use an approved client and model provider for private projects. Margin runs loca
 Run a refresh after you edit files, switch branches, or change the folders Margin reads. Replace `demo` with your project ID.
 
 ```sh
-npx --yes @jccrosby/margin@0.1.0 \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" refresh demo
+margin refresh demo
 ```
 
 Margin stores a search index in a SQLite file beside `projects.json`. It updates each folder's index in one transaction. If a scan fails or stops, search can still use the last completed update.
@@ -38,9 +37,7 @@ To move your main checkout or notes, run `register` again with the same project 
 Use a distinct project ID for each worktree you want to search separately. To search a second checkout as part of the same project, give it its own root ID. A root ID names a source folder within the project.
 
 ```sh
-npx --yes @jccrosby/margin@0.1.0 \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" \
-  add-checkout demo extra "/absolute/path/to/second-checkout"
+margin add-checkout demo extra "/absolute/path/to/second-checkout"
 ```
 
 Run the command again with the same root ID and a new path to move that checkout. Refresh after changing any folder. Source IDs stay the same for files at the same relative path under the same root ID.
@@ -56,9 +53,7 @@ On Windows, add the folders for `docling.exe`, `ffmpeg.exe`, and `ffprobe.exe` t
 Approve each HTTPS URL before running refresh. Replace the example URL with the page you want Margin to read.
 
 ```sh
-npx --yes @jccrosby/margin@0.1.0 \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" \
-  approve-url demo 'https://example.com/requirements'
+margin approve-url demo 'https://example.com/requirements'
 ```
 
 Approve each redirect target too. To revoke approval, remove the URL from that project's `approvedUrls` list in `projects.json`.
@@ -74,8 +69,7 @@ Margin rejects storage with access control list (ACL) grants. A deny-only ACL ca
 Enable saves for a project from the terminal.
 
 ```sh
-npx --yes @jccrosby/margin@0.1.0 \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" note-saves demo enable
+margin note-saves demo enable
 ```
 
 Ask your MCP client to save a note in `demo`. The client must follow its approval policy. To stop new saves and retries, run the same command with `disable`. Existing notes stay readable.
@@ -88,12 +82,11 @@ Close Codex sessions that use the registry. Wait for any Margin commands that us
 
 Export to a new directory inside an existing private folder. Keep the backup outside all registered source folders. The backup contains note files, metadata, and citations. Keep the original `projects.json` separately.
 
-On macOS or Ubuntu, use your registry path and package version in these commands.
+On macOS, use a new backup path in a private directory.
 
 ```sh
-margin_registry="$HOME/Library/Application Support/Margin/projects.json"
-margin_backup="$(dirname "$margin_registry")/Notes backup"
-npx --yes @jccrosby/margin@0.1.0 --registry "$margin_registry" export-notes "$margin_backup"
+margin_backup="$HOME/Library/Application Support/Margin/Notes backup"
+margin export-notes "$margin_backup"
 ```
 
 On Windows, use `$node`, `$entry`, and `$registry` from the [PowerShell setup](windows.md#install-and-register-a-project).
@@ -106,7 +99,7 @@ $backup = Join-Path (Split-Path -Parent $registry) 'Notes backup'
 To recover a missing note store, use the original registry path and project IDs. Restore stops if the store already exists. Leave the backup files and directories in place.
 
 ```sh
-npx --yes @jccrosby/margin@0.1.0 --registry "$margin_registry" restore-notes "$margin_backup"
+margin restore-notes "$margin_backup"
 ```
 
 ```powershell
@@ -114,6 +107,24 @@ npx --yes @jccrosby/margin@0.1.0 --registry "$margin_registry" restore-notes "$m
 ```
 
 Run `refresh` for each restored project to rebuild search from the notes. Refresh also reads notes when the project has saves disabled. Start a fresh Codex session, then read and search for a restored note.
+
+## Run Margin from scripts
+
+Use `register` and `refresh` for unattended setup. Pass `--registry` before the command to select a specific projects file. Use an absolute path in a private directory outside every source folder. On macOS, omitting the flag selects `~/Library/Application Support/Margin/projects.json`.
+
+```sh
+projects="/absolute/path/to/private/projects.json"
+margin --registry "$projects" register demo "/absolute/path/to/checkout" "/absolute/path/to/notes"
+margin --registry "$projects" refresh demo
+```
+
+Omit the last argument to register only the checkout. Running `register` again with the same ID replaces the main checkout and notes paths. Use `margin --help` for the command list.
+
+Set the script to stop or handle errors after each command. A successful `register` prints a confirmation. `refresh` prints one JSON object with `projectId` and `roots`. A root with gaps makes `refresh` exit with code 1 even when it prints JSON. If a command fails before refresh can run, read stderr.
+
+Start MCP with `margin --registry "$projects" serve` and use stdio. Keep stdout reserved for MCP messages. Use the same registry for registration, refresh, and MCP.
+
+Pin the installed package version when you need repeatable runs. For a source build, replace `margin` with `node /absolute/path/to/margin/dist/margin.js`. See the platform guides for the [Ubuntu launcher](ubuntu.md) and the [Windows launcher](windows.md).
 
 ## Tools
 

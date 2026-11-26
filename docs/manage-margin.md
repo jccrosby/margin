@@ -1,8 +1,19 @@
 # Update or remove Margin
 
-Run `codex mcp get margin` to see how Codex launches Margin. The output shows the path after `--registry`. Use that projects file if you chose a different path during setup.
+Run `codex mcp get margin` to see how Codex launches Margin. On macOS, the default projects file is `~/Library/Application Support/Margin/projects.json`. If the output includes `--registry`, use the path after that flag.
 
-## Update a downloaded version
+## Update an installed version
+
+Run these commands from your home directory.
+
+```sh
+npm install --global @jccrosby/margin
+margin --help
+```
+
+To pick a specific version, append `@<version>` to the package name. Start a fresh Codex session and search a project you know. If the `margin` command moved, [connect Codex again](../README.md#connect-codex-and-try-a-search).
+
+## Update an npx or pnpm dlx launcher
 
 1. From your home directory, run `npm view @jccrosby/margin versions --json` to see the published versions you can access.
 2. Replace `0.1.0` below with the version you want. Use the projects path from `codex mcp get margin`.
@@ -46,7 +57,9 @@ codex mcp remove margin
 codex mcp list
 ```
 
-The projects file and search indexes remain on disk so you can connect again later. The `npx` and `pnpm dlx` setup uses a download cache. It does not require a global uninstall.
+The projects file and search indexes remain on disk so you can connect again later.
+
+If you installed Margin globally, run `npm uninstall --global @jccrosby/margin` to remove the command. The `npx` and `pnpm dlx` launchers use a download cache.
 
 ## Remove one project
 
