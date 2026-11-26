@@ -2,121 +2,81 @@
 
 Margin lets Codex search and read your local project files. It works with Git checkouts and optional folders of notes. It can also save private project notes when you enable saves.
 
-- [Install and use Margin on Windows](docs/windows.md)
-- [Install and use Margin on Ubuntu](docs/ubuntu.md)
 - [Search, refresh, and add sources](docs/usage.md)
 - [Update or remove Margin](docs/manage-margin.md)
 
 ## Get access to Margin
 
-The following macOS examples need macOS 26 on Apple silicon and local APFS. They use Node.js 26, Git, Codex CLI, and `npx` from npm.
+Ask the package owner for **Read** access to `@jccrosby/margin`. Create a GitHub personal access token (classic) with the `read:packages` scope.
 
-The **package** is the downloadable copy of the Margin program. GitHub Packages hosts it at `https://npm.pkg.github.com`. Its name is `@jccrosby/margin`.
+Run these commands from your home directory. Enter your GitHub username and use your token as the password. [GitHub Packages authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages)
 
-1. Ask the package owner for **Read** access to `@jccrosby/margin`.
-2. In GitHub, create a personal access token (classic) with the `read:packages` scope. [GitHub Packages authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages)
-3. Run this command to create `~/.npmrc` if needed and restrict access to your account.
+```sh
+cd "$HOME"
+(umask 077 && touch .npmrc && chmod 600 .npmrc)
+npm login --scope=@jccrosby --registry=https://npm.pkg.github.com --auth-type=legacy
+```
 
-   ```sh
-   (umask 077 && touch "$HOME/.npmrc" && chmod 600 "$HOME/.npmrc")
-   ```
+## Install on macOS
 
-4. Open `~/.npmrc` in a text editor. Add these lines or update the existing entries. Replace `REPLACE_WITH_YOUR_READ_TOKEN` with your token. Keep the token in this file and out of your project and Codex settings.
+Use macOS 26 on Apple silicon, local APFS, Node.js 26, and Git. Install the Codex CLI to search from Codex.
 
-   ```ini
-   @jccrosby:registry=https://npm.pkg.github.com
-   //npm.pkg.github.com/:_authToken=REPLACE_WITH_YOUR_READ_TOKEN
-   ```
+```sh
+npm install --global @jccrosby/margin
+```
 
-5. To pick a specific version, list the versions you can download. Run this from your home directory.
-
-   ```sh
-   cd "$HOME"
-   npm view @jccrosby/margin versions --json
-   ```
-
-If the lookup fails, check your Read access, token, and whether the owner has published a version. If you have the source code, you can [run Margin from a checkout](#run-margin-from-a-checkout).
+Use a release that includes `margin setup`. Run `margin --help` to check. If the package lacks this command, [build from source](#run-margin-from-a-checkout).
 
 ## Register and index your first project
 
-Run the commands below in Terminal. Replace `0.1.0` with a published version, or use `@jccrosby/margin@latest`. The `latest` tag points to the release the publisher has marked as the default. [npm package tags](https://docs.npmjs.com/cli/v11/commands/npm-dist-tag/)
-
-Margin calls its local projects file a **registry**. The `--registry` option takes that file's full path. The `registry` setting in `~/.npmrc` tells npm where to download Margin.
-
-Pick a short ID for your project, such as `demo`. Replace `/absolute/path/to/checkout` with the full path to your Git checkout.
+Open a terminal in the Git checkout you want to search and run:
 
 ```sh
-npx --yes @jccrosby/margin@0.1.0 \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" \
-  register demo "/absolute/path/to/checkout"
+margin setup
 ```
 
-`npx` downloads the requested version if needed and runs it. Margin creates `projects.json` on the first registration. Keep it in a private directory outside every registered folder.
+Margin finds the checkout root and asks for a project ID and an optional notes folder. Press Enter to accept the suggested ID. Press Enter again to skip notes, or type a folder path.
 
-To include notes, append the full path to an existing notes folder after the checkout path. Use your chosen project ID in every command that shows `demo`.
+Margin registers and indexes the project. It stores the registry and search indexes in `~/Library/Application Support/Margin`. Use a new project ID for each setup.
 
-Run a refresh to make the files searchable.
-
-```sh
-npx --yes @jccrosby/margin@0.1.0 \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" refresh demo
-```
-
-Look for `"status":"complete"` for each folder in the output. If a folder has gaps, see [Refresh after files change](docs/usage.md#refresh-after-files-change).
-
-If you prefer pnpm, replace `npx --yes` with `pnpm dlx --` in the examples. Keep the package name, version, and remaining arguments.
+If setup reports indexing gaps, fix the reported errors and [refresh the project](docs/usage.md#refresh-after-files-change).
 
 ## Connect Codex and try a search
 
-Use the same projects path you used to register the project. Choose an exact version to keep Codex on that release. With `@latest`, Codex can pick up a new release when it next starts Margin.
+Run this once for your macOS install:
 
 ```sh
-codex mcp add margin -- npx --yes @jccrosby/margin@0.1.0 \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" serve
+codex mcp add margin -- "$(command -v margin)" serve
 codex mcp get margin
 ```
 
-Codex saves the values from your terminal when you run `mcp add`. Check that `mcp get` shows your version or tag and the full path to `projects.json`.
-
-Start a new Codex session. Replace `PlayerControls` with a name you know appears in your checkout and try this prompt.
+Start a fresh Codex session. Replace `demo` with your project ID, and use a word you know appears in your checkout.
 
 > Use Margin to search project `demo` for `PlayerControls`. Show the file paths and line numbers for the best matches.
 
-If Margin fails to start, check that Codex can find Node.js, Git, and `npx`. It also needs access to your npm settings, projects file, and source folders. If Codex cannot find `npx`, run `command -v npx` and use the printed path in `codex mcp add`.
-
-For another local MCP client, use the command and arguments after `codex mcp add margin --`. Select the stdio transport.
+For another MCP client, use the same command and arguments after `--` with the stdio transport.
 
 ## Run Margin from a checkout
 
-If you have access to the Margin repository, clone it and enter the checkout.
+Clone the Margin repository if you need a local copy. Install the Xcode Command Line Tools and use pnpm 12.18.0.
 
 ```sh
 git clone https://github.com/jccrosby/margin.git
 cd margin
-```
-
-If you already have a Margin checkout, open it in your terminal. Install the Xcode Command Line Tools for the native build. Then use pnpm 12.18.0 to install and build Margin.
-
-```sh
 pnpm install --frozen-lockfile
 pnpm run build
+margin_entry="$PWD/dist/margin.js"
 ```
 
-Run these commands from the Margin checkout. Replace the example checkout path with the full path to the project you want to search. You can append a notes folder path after it.
+In the same terminal, switch to the Git checkout you want to search. Replace the example path with your own.
 
 ```sh
-node "$PWD/src/margin.ts" \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" \
-  register demo "/absolute/path/to/checkout"
-node "$PWD/src/margin.ts" \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" refresh demo
-codex mcp add margin -- node "$PWD/src/margin.ts" \
-  --registry "$HOME/Library/Application Support/Margin/projects.json" serve
+cd "/absolute/path/to/your/checkout"
+node "$margin_entry" setup
+codex mcp add margin -- "$(command -v node)" "$margin_entry" serve
 ```
 
-Open a new session and [try a search](#connect-codex-and-try-a-search).
-
-For other examples, run from the Margin checkout. Replace `npx --yes @jccrosby/margin@0.1.0` with `node "$PWD/src/margin.ts"`.
+Start a new Codex session and [try a search](#connect-codex-and-try-a-search). Use `node "$margin_entry"` in place of `margin` for other commands.
 
 ## Verify a development checkout
 
@@ -136,6 +96,8 @@ The Step 1 check used a fresh Codex CLI 0.167.0 session. Codex read bounded pass
 The checkout paths, file hashes, and Git status matched the baseline.
 
 See the [release instructions](RELEASING.md) for package checks and publishing.
+
+See the [Windows guide](docs/windows.md) and [Ubuntu guide](docs/ubuntu.md) for their installation commands.
 
 ## Evaluate retrieval
 

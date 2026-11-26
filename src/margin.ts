@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { isNativeAbsolutePath, windows } from './filesystem.ts';
+import { homedir } from 'node:os';
+import { basename, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
+import { isNativeAbsolutePath, windows, withDirectory } from './filesystem.ts';
 import { Server, type CallToolResult, type Tool } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
@@ -9,6 +12,7 @@ import {
   type Project, type Root
 } from './registry.ts';
 import { evidenceFormat, evidenceLocation, versionHash, type ImageBlock } from './evidence.ts';
+import { git } from './git.ts';
 import { linksId } from './links.ts';
 import { commitNote, noteInput, savedNoteRoot } from './notes.ts';
 import { backupProjectNotes } from './note-backup.ts';
@@ -259,12 +263,77 @@ function result(data: Record<string, unknown>, images: ImageBlock[] = []): CallT
   };
 }
 
-const [option, registryPath, command, ...args] = process.argv.slice(2);
-try {
-  if (option !== '--registry' || !registryPath || (!windows && !isNativeAbsolutePath(registryPath))) {
+async function refresh(registryPath: string, projectId: string) {
+  const registry = registryLocation(registryPath);
+  using writer = registryWriteLock(registry);
+  const { project, allRoots } = getProject(registry, id.parse(projectId));
+  const savedNotes = savedNoteRoot(registryPath, projectId, allRoots);
+  const roots = await refreshProject(registryPath, projectId, indexRoots(project, savedNotes), allRoots);
+  console.log(JSON.stringify({ projectId, roots }));
+  if (roots.some(root => root.status !== 'complete')) process.exitCode = 1;
+}
+
+async function setup(registryPath: string) {
+  const { stdin, stderr } = process;
+  if (!stdin.isTTY || !stderr.isTTY) {
+    throw new Error('Run margin setup in a terminal. In scripts, use register and refresh.');
+  }
+  let checkout;
+  try {
+    checkout = withDirectory(process.cwd(), fd => git(fd, 'rev-parse', '--show-toplevel')).toString().replace(/\n$/, '');
+  } catch {
+    throw new Error('Run margin setup from a local APFS Git checkout.');
+  }
+  const name = basename(checkout);
+  const suggestedId = id.safeParse(name).success ? name : 'project';
+  using prompt = createInterface({ input: stdin, output: stderr });
+  const answers = prompt[Symbol.asyncIterator]();
+  stderr.write(`Checkout: ${JSON.stringify(checkout)}\nProject ID [${suggestedId}]: `);
+  const project = await answers.next();
+  if (project.done) throw new Error('Setup canceled.');
+  const projectId = project.value.trim() || suggestedId;
+  if (!id.safeParse(projectId).success) {
+    throw new Error('Start the project ID with a letter or number. Use only letters, numbers, dots, hyphens, and underscores.');
+  }
+  stderr.write('Notes folder (Enter to skip): ');
+  const notes = await answers.next();
+  if (notes.done) throw new Error('Setup canceled.');
+  prompt.close();
+  const path = notes.value;
+  const notesPath = path.startsWith('~/') ? join(homedir(), path.slice(2)) : resolve(path);
+  register(registryPath, projectId, checkout, path ? notesPath : undefined, true);
+  stderr.write(`Registered ${projectId}.\n`);
+  await refresh(registryPath, projectId);
+}
+
+const macos = process.platform === 'darwin';
+const commands = [
+  ...(macos ? ['  setup'] : []),
+  '  refresh <project-id>',
+  '  serve',
+  '  register <project-id> <checkout> [notes]',
+  '  add-checkout <project-id> <root-id> <checkout>',
+  '  approve-url <project-id> <https-url>',
+  '  note-saves <project-id> <enable|disable>',
+  '  export-notes <backup-directory>',
+  '  restore-notes <backup-directory>'
+].join('\n');
+const usage = `Usage: margin ${macos ? '[--registry <absolute-path>]' : '--registry <absolute-path>'} <command>\n\n${commands}`;
+
+async function run(argv: string[]) {
+  if (argv.length === 0 || (argv.length === 1 && ['--help', '-h'].includes(argv[0]))) {
+    console.log(usage);
+    return;
+  }
+  const explicit = argv[0] === '--registry';
+  const registryPath = explicit ? argv[1] : macos ? join(homedir(), 'Library', 'Application Support', 'Margin', 'projects.json') : undefined;
+  if (!registryPath || (!windows && !isNativeAbsolutePath(registryPath))) {
     throw new Error('Use --registry with an absolute path.');
   }
-  if (command === 'register' && (args.length === 2 || args.length === 3)) {
+  const [command, ...args] = argv.slice(explicit ? 2 : 0);
+  if (macos && command === 'setup' && args.length === 0) {
+    await setup(registryPath);
+  } else if (command === 'register' && (args.length === 2 || args.length === 3)) {
     register(registryPath, args[0], args[1], args[2]);
     console.log(`Registered ${args[0]}.`);
   } else if (command === 'add-checkout' && args.length === 3) {
@@ -281,21 +350,16 @@ try {
     backupProjectNotes(registryPath, args[0], restore);
     console.log(restore ? 'Restored saved notes. Refresh the restored projects to rebuild search.' : 'Exported saved notes.');
   } else if (command === 'refresh' && args.length === 1) {
-    const [projectId] = args;
-    const registry = registryLocation(registryPath);
-    using writer = registryWriteLock(registry);
-    const { project, allRoots } = getProject(registry, id.parse(projectId));
-    const savedNotes = savedNoteRoot(registryPath, projectId, allRoots);
-    const roots = await refreshProject(registryPath, projectId, indexRoots(project, savedNotes), allRoots);
-    console.log(JSON.stringify({ projectId, roots }));
-    if (roots.some(root => root.status !== 'complete')) process.exitCode = 1;
+    await refresh(registryPath, args[0]);
   } else if (command === 'serve' && args.length === 0) {
     await serve(registryPath);
   } else {
-    throw new Error('Use serve, refresh <project-id>, register <project-id> <checkout> [notes], ' +
-      'add-checkout <project-id> <root-id> <checkout>, approve-url <project-id> <https-url>, ' +
-      'note-saves <project-id> <enable|disable>, export-notes <backup-directory>, or restore-notes <backup-directory>.');
+    throw new Error(usage);
   }
+}
+
+try {
+  await run(process.argv.slice(2));
 } catch (error) {
   console.error(error instanceof Error ? error.message : 'Margin failed.');
   if (error instanceof MarginError && error.detail) console.error(error.detail);
